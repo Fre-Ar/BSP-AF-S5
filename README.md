@@ -21,7 +21,10 @@
 - NIRs are NNs that estimate a continuous signal, by training on discretely represented samples of the same signal.
 - The storage required for such a representation scales with the complexity of the signal; it is independent of spatial resolution.
 
-### https://arxiv.org/abs/2411.03688
+### Where Do We Stand with NIRs?
+- https://arxiv.org/abs/2411.03688
+
+### https://github.com/vsitzmann/awesome-implicit-representations
 
 ## Frameworks
 - PyTorch
