@@ -1,8 +1,44 @@
 # BSP-AF-S5
 
+## Open Questions
+- 
+- How do you decide how many neurons per layer and how many layers?
+
+## Refined BSP Goals
+### Refined Scientific Question
+- How well can **compact** neural implicit representations (NIRs) trained on a global borders dataset accurately approximate the spherical distance‐to‐border field (and jointly predict the containing country and the adjacent country at the nearest border)? Can they achieve this at **interactive shader speeds**, within **an accepted bounded error**, and while capturing **high-frequency geometry**? Which architecture maximizes speed and accuracy under these constraints?
+
+- Compact: All parameters ≤ 400 Mb.
+- Interactive shader speeds: On a 1080p screen, there are 2073600 (1920x1080) pixels. At 60fps, it means our NN needs to accomplish at most 124M querries per second when fully parallelized on a GPU.
+- Accepted bounded error: 
+  - Global Median distance ≤ 10 km
+  - Within 25km of any border: ≤ 4 km
+  - Country classification ≥ 99%
+- High-frequency geometry: Border areas with high curvature (costal fjords, exclaves, small countries).
+
+#### Expected Scientific Deliverables
+- Paper explaining architectures, methodology, decisions, etc
+- Graph comparing different architectures on speed in one axis, accuracy on the other.
+
+### Expected Technical Deliverables
+- "Naive" Solver: A Python function which parses the borders dataset using geopandas, and returns a point-to-nearest segment distance with full accuracy, as well as the proper country labels (this is the baseline with whom all models will be compared to).
+    - p = (x,y,z) -> (distance, country1, country2), where |p|=1
+- Neural Field Models: Trained using PyTorch, all trained using the same set of sample points, but each having different architectures (different neurons per layer and layer count, different activation functions, some use positional encoding, etc). The performance and accuracy metrics are measured using a different set of sample points.
+
+> Is the topic/goals sufficient?
+
+## Decisions
+- Dataset: World Bank International Borders
+- 
+
 ## Assumptions
 - Static Data
 - Single GPU
+- Earth is a perfect sphere. Distances are calculated using geodesic distance.
+- The entire globe is fully partioned (the oceans count as their own country).
+- Borders are polylines; each edge is the minor great-circle arc between consecutive vertices.
+- "Nearest border segment" means the point on any arc that minimizes geodesic distance to the query point.
+
 
 ## Research Papers
 ### The Case for Learned Index Structures
@@ -23,10 +59,16 @@
 
 ### Where Do We Stand with NIRs?
 - https://arxiv.org/abs/2411.03688
+#### Contents
+- 
 
 ### https://github.com/vsitzmann/awesome-implicit-representations
+#### Contents
+- 
 
 ## Frameworks
-- PyTorch
-- JAX
+- [x] PyTorch
+- [ ] JAX
 
+
+## Notes
