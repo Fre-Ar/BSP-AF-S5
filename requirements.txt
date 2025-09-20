@@ -1,0 +1,14 @@
+# Core
+numpy
+pandas
+pyarrow
+torch
+
+# Geo stack
+shapely
+geopandas
+pyogrio
+
+# Nice-to-have / used in code
+tqdm>=4.65
+xxhash>=3.2    
