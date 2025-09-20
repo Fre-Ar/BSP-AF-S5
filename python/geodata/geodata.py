@@ -1,10 +1,12 @@
 import numpy as np, pandas as pd
 import geopandas as gpd
 import os, math, itertools, time
-import pyarrow as pa, pyarrow.parquet as pq
+import pyarrow as pa, pyarrow.parquet as pq, pyarrow.dataset as ds
 from shapely.geometry import Point
 from shapely.strtree import STRtree
+import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from numpy.random import default_rng, SeedSequence
 try:
     import xxhash
 except ImportError:
@@ -19,12 +21,39 @@ except Exception:
     tqdm = None  # fallback: no progress bar
 
 R_EARTH_KM = 6371.0088  # mean Earth radius
+EPS_THETA = 1e-9
 FOLDER_PATH = "python/geodata/"
 GPKG_PATH   = "python/geodata/world_bank_geodata.gpkg"
 BORDERS_FGB = "python/geodata/borders.fgb"
 LAYER       = "countries"
 ID_FIELD    = "id"   
  
+# ---- globals for worker reuse ----
+_BS = None
+_ID2GEOM = None
+_ID_FIELD_GLOBAL = None
+_GLOBAL_RNG = default_rng(12345)
+
+def set_global_seed(seed: int):
+    global _GLOBAL_RNG
+    _GLOBAL_RNG = default_rng(seed)
+
+def _ensure_rng(rng):
+    return rng if rng is not None else _GLOBAL_RNG
+
+def _central_angle(a, b):
+    # a,b: (N,3) unit vectors
+    dot = np.clip((a * b).sum(axis=1), -1.0, 1.0)
+    return np.arccos(dot)
+
+def _safe_norm(v, axis=1, keepdims=True, eps=1e-15):
+    n = np.linalg.norm(v, axis=axis, keepdims=keepdims)
+    n = np.where(n < eps, eps, n)
+    return n
+
+def _safe_div(v, n, eps=1e-15):
+    n = np.where(n < eps, 1.0, n)
+    return v / n
 
 def xyz_to_lonlat(x, y, z):
     # Assume (x,y,z) is on the unit sphere
@@ -68,8 +97,9 @@ def greatcircle_point_segment_dist_km(p_lon, p_lat, a_lon, a_lat, b_lon, b_lat):
         )
     return R_EARTH_KM * theta
 
-def rand_unit_vec(n: int) -> np.ndarray:
-    v = np.random.normal(size=(n, 3)).astype(np.float64)
+def rand_unit_vec(n: int, rng=None) -> np.ndarray:
+    rng = _ensure_rng(rng)
+    v = rng.normal(size=(n, 3)).astype(np.float64)
     v /= np.linalg.norm(v, axis=1, keepdims=True)
     return v.astype(np.float32)
 
@@ -93,15 +123,31 @@ def move_along_geodesic(p: np.ndarray, t: np.ndarray, theta: np.ndarray) -> np.n
     out /= np.linalg.norm(out, axis=1, keepdims=True)
     return out.astype(np.float32)
 
-def sample_distance_km(batch_size: int):
+
+def sample_distance_km(batch_size: int, rng=None):
     """Piecewise log-uniform bands favoring near-border points."""
     # probs over bands: [0–10], [10–50], [50–300] km
-    bands = np.random.choice([0, 1, 2], size=batch_size, p=[0.6, 0.3, 0.1])
-    low = np.array([0.1, 10.0, 50.0], dtype=np.float32)[bands]  # avoid exactly 0
+    rng = _ensure_rng(rng)
+    bands = rng.choice([0, 1, 2], size=batch_size, p=[0.6, 0.3, 0.1])
+    low = np.array([0.1, 10.0, 50.0], dtype=np.float32)[bands]
     high = np.array([10.0, 50.0, 300.0], dtype=np.float32)[bands]
-    u = np.random.rand(batch_size).astype(np.float32)
+    u = rng.random(batch_size, dtype=np.float32)
     d = np.exp(np.log(low) + u * (np.log(high) - np.log(low))).astype(np.float32)
     return d, bands.astype(np.uint8)
+
+
+def _merge_parquet(paths, out_path, delete_inputs=True, row_group_size=256_000):
+    """Concatenate many Parquet shards into one file."""
+    import pyarrow as pa, pyarrow.parquet as pq, pyarrow.dataset as ds
+    if len(paths) == 0:
+        return
+    dataset = ds.dataset(paths, format="parquet")
+    table = dataset.to_table()
+    pq.write_table(table, out_path, compression="zstd", row_group_size=row_group_size)
+    if delete_inputs:
+        for p in paths:
+            try: os.remove(p)
+            except: pass
 
 class BorderSampler:
     """
@@ -236,52 +282,55 @@ class BorderSampler:
         return self.sample_lonlat(lon, lat)
 
 # ---- core: sample near precomputed border segments ----
-def sample_near_border(sampler: BorderSampler, M: int):
-    """Return lon, lat, xyz, seg_id, id_a, id_b, r_band for M samples near borders."""
-    # segment endpoints in unit vectors
+def sample_near_border(sampler: BorderSampler, M: int, rng=None):
+    rng = _ensure_rng(rng)
     ax = sampler._ax.astype(np.float64); ay = sampler._ay.astype(np.float64)
     bx = sampler._bx.astype(np.float64); by = sampler._by.astype(np.float64)
     A = lonlat_deg_to_unitvec(ax, ay).astype(np.float64)
     B = lonlat_deg_to_unitvec(bx, by).astype(np.float64)
 
-    # weight segments roughly by angular length (spherical angle)
-    dot = np.clip((A * B).sum(axis=1), -1.0, 1.0)
-    theta_seg = np.arccos(dot) + 1e-9
+    # (optional) prune near-degenerate segments for stability
+    dot_all = np.clip((A * B).sum(axis=1), -1.0, 1.0)
+    theta_seg_all = np.arccos(dot_all)
+    valid = theta_seg_all > 1e-9
+    A, B = A[valid], B[valid]
+    ax, ay, bx, by = ax[valid], ay[valid], bx[valid], by[valid]
+    ida_all = sampler._id_a[valid].astype(np.int32)
+    idb_all = sampler._id_b[valid].astype(np.int32)
+
+    theta_seg = theta_seg_all[valid] + 1e-15
     probs = (theta_seg / theta_seg.sum()).astype(np.float64)
 
-    idx = np.random.choice(len(sampler.borders), size=M, p=probs)
+    idx = rng.choice(len(A), size=M, p=probs)
 
     a = A[idx]; b = B[idx]
-    # SLERP to random point along segment
     dot_ab = np.clip((a * b).sum(axis=1), -1.0, 1.0)
     theta = np.arccos(dot_ab)
-    t = np.random.rand(M)
+    t = rng.random(M)
     sin_th = np.sin(theta)
-    coef_a = np.sin((1.0 - t) * theta) / sin_th
-    coef_b = np.sin(t * theta) / sin_th
+    small = sin_th < 1e-12
+    coef_a = np.empty_like(theta); coef_b = np.empty_like(theta)
+    coef_a[~small] = np.sin((1.0 - t[~small]) * theta[~small]) / sin_th[~small]
+    coef_b[~small] = np.sin(t[~small] * theta[~small]) / sin_th[~small]
+    coef_a[small] = 1.0 - t[small]; coef_b[small] = t[small]
     p = (a * coef_a[:, None] + b * coef_b[:, None])
-    p /= np.linalg.norm(p, axis=1, keepdims=True)
+    p = _safe_div(p, _safe_norm(p))
 
-    # great-circle tangent at p: tgc = normalize(n × p), with n = normalize(a × b)
-    n = np.cross(a, b); n /= np.linalg.norm(n, axis=1, keepdims=True)
-    tgc = np.cross(n, p); tgc /= np.linalg.norm(tgc, axis=1, keepdims=True)
+    n = np.cross(a, b); n = _safe_div(n, _safe_norm(n))
+    tgc = np.cross(n, p); tgc = _safe_div(tgc, _safe_norm(tgc))
+    u = np.cross(tgc, p); u = _safe_div(u, _safe_norm(u))
+    side = rng.random(M) < 0.5
+    u = u * np.where(side, 1.0, -1.0)[:, None]
 
-    # side vector orthogonal in tangent plane: u = normalize(tgc × p), flip side 50/50
-    u = np.cross(tgc, p); u /= np.linalg.norm(u, axis=1, keepdims=True)
-    side = (np.random.rand(M) < 0.5).astype(np.float64)
-    side = np.where(side > 0, 1.0, -1.0)[:, None]
-    u = (u * side)
-
-    # offsets
-    d_km_hint, r_band = sample_distance_km(M)
+    d_km_hint, r_band = sample_distance_km(M, rng=rng)
     theta_off = (d_km_hint.astype(np.float64) / R_EARTH_KM)
     p_off = move_along_geodesic(p.astype(np.float32), u.astype(np.float32), theta_off.astype(np.float32))
 
     lon, lat = unitvec_to_lonlat(p_off)
     seg_id = idx.astype(np.int32)
-    id_a = sampler._id_a[idx].astype(np.int32)
-    id_b = sampler._id_b[idx].astype(np.int32)
-    return lon, lat, p_off, seg_id, id_a, id_b, r_band
+    id_a = ida_all[idx]
+    id_b = idb_all[idx]
+    return lon, lat, p_off.astype(np.float32), seg_id, id_a, id_b, r_band
 
 # ---- deterministic hashing -> split bucket ----
 def _hash_bucket(lon: float, lat: float, split_probs=(0.8, 0.1, 0.1)) -> int:
@@ -303,17 +352,23 @@ def make_dataset(
     n_total: int,
     out_dir: str = "dataset_dev",
     split_probs=(0.8, 0.1, 0.1),
-    mixture=(0.70, 0.30),         # (near_border, uniform_sphere)
+    mixture=(0.70, 0.30),
     shard_size: int = 500_000,
+    seed: int | None = 12345,   # NEW
 ):
+    if seed is not None:
+        rng = default_rng(seed)
+    else:
+        rng = _GLOBAL_RNG
+        
     out_dir = os.path.join(FOLDER_PATH, out_dir)
     os.makedirs(out_dir, exist_ok=True)
     n_border = int(mixture[0] * n_total)
     n_uniform = n_total - n_border
 
     # 1) draw points
-    lon_b, lat_b, xyz_b, seg_id, id_a, id_b, r_band = sample_near_border(sampler, n_border)
-    xyz_u = rand_unit_vec(n_uniform)
+    lon_b, lat_b, xyz_b, seg_id, id_a, id_b, r_band = sample_near_border(sampler, n_border, rng=rng)
+    xyz_u = rand_unit_vec(n_uniform, rng=rng)
     lon_u, lat_u = unitvec_to_lonlat(xyz_u)
 
     lon = np.concatenate([lon_b, lon_u]).astype(np.float32)
@@ -360,174 +415,330 @@ def make_dataset(
 
     print(f"Wrote Parquet shards to {out_dir}/{{train,val,test}}")
 
-def sample_near_border_for_sampler(sampler, M: int):
-    """Use the sampler's preloaded border arrays; returns lon, lat, xyz, is_border_flag, r_band."""
+def sample_near_border_for_sampler(sampler: BorderSampler, M: int, rng=None):
+    rng = _ensure_rng(rng)
     ax = sampler._ax.astype(np.float64); ay = sampler._ay.astype(np.float64)
     bx = sampler._bx.astype(np.float64); by = sampler._by.astype(np.float64)
-
     A = lonlat_deg_to_unitvec(ax, ay).astype(np.float64)
     B = lonlat_deg_to_unitvec(bx, by).astype(np.float64)
 
-    dot = np.clip((A * B).sum(axis=1), -1.0, 1.0)
-    theta_seg = np.arccos(dot) + 1e-9
+    dot_all = np.clip((A * B).sum(axis=1), -1.0, 1.0)
+    theta_seg_all = np.arccos(dot_all)
+    valid = theta_seg_all > 1e-9
+    A, B = A[valid], B[valid]
+    ax, ay, bx, by = ax[valid], ay[valid], bx[valid], by[valid]
+    ida_all = sampler._id_a[valid].astype(np.int32)
+    idb_all = sampler._id_b[valid].astype(np.int32)
+
+    theta_seg = theta_seg_all[valid] + 1e-15
     probs = (theta_seg / theta_seg.sum()).astype(np.float64)
 
-    idx = np.random.choice(len(sampler.borders), size=M, p=probs)
-    a = A[idx]; b = B[idx]
+    idx = rng.choice(len(A), size=M, p=probs)
+    a, b = A[idx], B[idx]
 
-    # SLERP along segment
     dot_ab = np.clip((a * b).sum(axis=1), -1.0, 1.0)
     theta = np.arccos(dot_ab)
-    t = np.random.rand(M)
+    t = rng.random(M)
     sin_th = np.sin(theta)
-    coef_a = np.sin((1.0 - t) * theta) / sin_th
-    coef_b = np.sin(t * theta) / sin_th
+    small = sin_th < 1e-12
+    coef_a = np.empty_like(theta); coef_b = np.empty_like(theta)
+    coef_a[~small] = np.sin((1.0 - t[~small]) * theta[~small]) / sin_th[~small]
+    coef_b[~small] = np.sin(t[~small] * theta[~small]) / sin_th[~small]
+    coef_a[small] = 1.0 - t[small]; coef_b[small] = t[small]
     p = (a * coef_a[:, None] + b * coef_b[:, None])
-    p /= np.linalg.norm(p, axis=1, keepdims=True)
+    p = _safe_div(p, _safe_norm(p))
 
-    # tangent + side
-    n = np.cross(a, b); n /= np.linalg.norm(n, axis=1, keepdims=True)
-    tgc = np.cross(n, p); tgc /= np.linalg.norm(tgc, axis=1, keepdims=True)
-    u = np.cross(tgc, p); u /= np.linalg.norm(u, axis=1, keepdims=True)
-    side = np.where(np.random.rand(M) < 0.5, 1.0, -1.0)[:, None]
-    u = (u * side)
+    n = np.cross(a, b); n = _safe_div(n, _safe_norm(n))
+    tgc = np.cross(n, p); tgc = _safe_div(tgc, _safe_norm(tgc))
+    u = np.cross(tgc, p); u = _safe_div(u, _safe_norm(u))
+    side = rng.random(M) < 0.5
+    u = u * np.where(side, 1.0, -1.0)[:, None]
 
-    d_km_hint, r_band = sample_distance_km(M)
+    d_km_hint, r_band = sample_distance_km(M, rng=rng)
     theta_off = (d_km_hint.astype(np.float64) / R_EARTH_KM)
     p_off = move_along_geodesic(p.astype(np.float32), u.astype(np.float32), theta_off.astype(np.float32))
 
     lon, lat = unitvec_to_lonlat(p_off)
     xyz = p_off.astype(np.float32)
     is_border = np.ones(M, np.uint8)
-    return lon, lat, xyz, is_border, r_band
+    id_a = ida_all[idx]
+    id_b = idb_all[idx]
+    return lon, lat, xyz, is_border, r_band, d_km_hint.astype(np.float32), id_a, id_b
+
 
 # ---------- worker ----------
-def _label_and_write_chunk(args):
-    """
-    Worker entrypoint. Construct a BorderSampler in the child process,
-    label the provided lon/lat points, and write a Parquet shard.
-    """
-    (gpkg_path, layer, id_field, borders_fgb,
-     lon_chunk, lat_chunk, xyz_chunk, is_border_chunk, r_band_chunk,
-     out_path) = args
 
-    # Rebuild sampler in the child proc
-    sampler = BorderSampler(
+def _init_worker(gpkg_path, layer, id_field, borders_fgb):
+    """Runs once per process. Build BorderSampler and a quick id->geometry map."""
+    global _BS, _ID2GEOM, _ID_FIELD_GLOBAL
+    _BS = BorderSampler(
         gpkg_path=gpkg_path,
         countries_layer=layer,
         id_field=id_field,
         borders_fgb=borders_fgb,
     )
+    _ID_FIELD_GLOBAL = id_field
+    # map: country id -> polygon (fast covers on just two candidates)
+    _ID2GEOM = {int(row[id_field]): geom for row, geom in zip(_BS.countries.to_dict("records"), _BS._poly_geoms)}
 
-    N = len(lon_chunk)
-    dist = np.empty(N, dtype=np.float32)
-    c1   = np.empty(N, dtype=np.int32)
-    c2   = np.empty(N, dtype=np.int32)
+def _label_and_write_chunk(args):
+    """
+    Worker: labels a chunk and writes a TEMP Parquet shard.
+    Returns ("ok", temp_path) or ("err", payload).
+    """
+    try:
+        (gpkg_path, layer, id_field, borders_fgb,
+         lon_chunk, lat_chunk, xyz_chunk, is_border_chunk, r_band_chunk,
+         dkm_hint_chunk, ida_chunk, idb_chunk,
+         temp_path) = args
 
-    for i in range(N):
-        d, ci, cj = sampler.sample_lonlat(float(lon_chunk[i]), float(lat_chunk[i]))
-        dist[i] = d; c1[i] = ci; c2[i] = cj
+        global _BS, _ID2GEOM
+        if _BS is None or _ID2GEOM is None:
+            _init_worker(gpkg_path, layer, id_field, borders_fgb)
 
-    df = pd.DataFrame({
-        "lon": lon_chunk.astype(np.float32),
-        "lat": lat_chunk.astype(np.float32),
-        "x": xyz_chunk[:,0].astype(np.float32),
-        "y": xyz_chunk[:,1].astype(np.float32),
-        "z": xyz_chunk[:,2].astype(np.float32),
-        "dist_km": dist,
-        "c1_id": c1,
-        "c2_id": c2,
-        "is_border": is_border_chunk.astype(np.uint8),
-        "r_band": r_band_chunk.astype(np.uint8),
-    })
-    table = pa.Table.from_pandas(df, preserve_index=False)
-    pq.write_table(table, out_path, compression="zstd")
-    return out_path
+        N = len(lon_chunk)
+        dist = np.empty(N, dtype=np.float32)
+        c1   = np.empty(N, dtype=np.int32)
+        c2   = np.empty(N, dtype=np.int32)
+
+        mb = (is_border_chunk == 1)
+        if np.any(mb):
+            dist[mb] = dkm_hint_chunk[mb]
+            for i in np.where(mb)[0]:
+                pt = Point(float(lon_chunk[i]), float(lat_chunk[i]))
+                ida = int(ida_chunk[i]); idb = int(idb_chunk[i])
+                ga = _ID2GEOM.get(ida); gb = _ID2GEOM.get(idb)
+                if ga is not None and ga.covers(pt):
+                    c1[i], c2[i] = ida, idb
+                elif gb is not None and gb.covers(pt):
+                    c1[i], c2[i] = idb, ida
+                else:
+                    d, ci, cj = _BS.sample_lonlat(float(lon_chunk[i]), float(lat_chunk[i]))
+                    dist[i], c1[i], c2[i] = d, ci, cj
+
+        mu = ~mb
+        if np.any(mu):
+            for i in np.where(mu)[0]:
+                d, ci, cj = _BS.sample_lonlat(float(lon_chunk[i]), float(lat_chunk[i]))
+                dist[i], c1[i], c2[i] = d, ci, cj
+
+        df = pd.DataFrame({
+            "lon": lon_chunk.astype(np.float32),
+            "lat": lat_chunk.astype(np.float32),
+            "x": xyz_chunk[:,0].astype(np.float32),
+            "y": xyz_chunk[:,1].astype(np.float32),
+            "z": xyz_chunk[:,2].astype(np.float32),
+            "dist_km": dist,
+            "c1_id": c1,
+            "c2_id": c2,
+            "is_border": is_border_chunk.astype(np.uint8),
+            "r_band": r_band_chunk.astype(np.uint8),
+        })
+        table = pa.Table.from_pandas(df, preserve_index=False)
+        pq.write_table(table, temp_path, compression="zstd")
+        return ("ok", temp_path)
+
+    except Exception as e:
+        import traceback
+        return ("err", {"error": str(e), "traceback": traceback.format_exc()})
+
+def _split_and_write(paths, out_dir, split_probs=(0.8, 0.1, 0.1), batch_rows: int | None = None):
+    """
+    - Streams each Parquet shard by row group (no pyarrow.dataset Scanner).
+    - Deterministically buckets rows into train/val/test by hashing (lon, lat).
+    - Writes exactly one Parquet per split and removes temp shards.
+    """
+    import os
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    if xxhash is None:
+        print("Warning: xxhash not installed -> split hashing uses Python's hash(). "
+              "For reproducible splits across runs, `pip install xxhash` or set PYTHONHASHSEED.")
+
+    split_names = ["train", "val", "test"]
+    out_files = {s: os.path.join(out_dir, f"{s}.parquet") for s in split_names}
+    writers = {s: None for s in split_names}
+    first_schema = None
+
+    try:
+        for p in paths:
+            pf = pq.ParquetFile(p)
+            num_rgs = pf.num_row_groups
+            for rg in range(num_rgs):
+                table = pf.read_row_group(rg)  # -> pyarrow.Table
+                # initialize writers on first batch with the discovered schema
+                if first_schema is None:
+                    first_schema = table.schema
+                    for s in split_names:
+                        writers[s] = pq.ParquetWriter(out_files[s], first_schema, compression="zstd")
+                _write_split_table(table, writers, split_probs, first_schema)
+            del pf
+    finally:
+        for w in writers.values():
+            if w is not None:
+                w.close()
+
+    # remove temp shards
+    for p in paths:
+        try:
+            os.remove(p)
+        except Exception:
+            pass
+
+    print(f"✔ Wrote one Parquet per split in: {out_dir}")
+    return out_files
+
+def _write_split_table(table, writers, split_probs, schema):
+    """
+    Arrow-native splitter: no pandas. Hash (lon,lat) -> bucket, then table.take()
+    and append to Parquet writers.
+    """
+    import pyarrow as pa
+    import numpy as np
+
+    # Extract lon/lat as numpy (copy allowed)
+    lon_arr = table.column("lon").to_numpy(zero_copy_only=False)
+    lat_arr = table.column("lat").to_numpy(zero_copy_only=False)
+    n = len(lon_arr)
+
+    # Deterministic bucket per row
+    th_train = int(split_probs[0] * 10_000)
+    th_val   = int((split_probs[0] + split_probs[1]) * 10_000)
+
+    buckets = np.empty(n, dtype=np.uint8)
+    if xxhash is None:
+        # fallback: Python hash (set PYTHONHASHSEED for run-to-run determinism)
+        for i in range(n):
+            s = f"{float(lon_arr[i]):.6f}|{float(lat_arr[i]):.6f}"
+            h = hash(s) % 10_000
+            buckets[i] = 0 if h < th_train else (1 if h < th_val else 2)
+    else:
+        for i in range(n):
+            s = f"{float(lon_arr[i]):.6f}|{float(lat_arr[i]):.6f}"
+            h = xxhash.xxh64(s).intdigest() % 10_000
+            buckets[i] = 0 if h < th_train else (1 if h < th_val else 2)
+
+    # Append rows to each split using Arrow take()
+    for sid, name in enumerate(("train", "val", "test")):
+        idx = np.flatnonzero(buckets == sid)
+        if idx.size == 0:
+            continue
+        idx_pa = pa.array(idx, type=pa.int64())
+        sub = table.take(idx_pa)
+        # Ensure schema/field order matches writers' schema
+        if not sub.schema.equals(schema):
+            sub = sub.cast(schema)
+        writers[name].write_table(sub)
 
 # ---------- public API ----------
 def make_dataset_parallel(
     n_total: int,
-    out_dir: str = "dataset_dev_parallel",
-    split_probs=(0.8, 0.1, 0.1),
-    mixture=(0.70, 0.30),      # (near_border, uniform)
-    chunk_size: int = 200_000, # per-process chunk size (tune to RAM/cores)
+    out_dir: str = "dataset_full_then_split",
+    mixture=(0.70, 0.30),           # (near-border, uniform)
+    shards_per_total: int = 16,     # how many temp shards to create total (↑ for more parallelism)
     max_workers: int | None = None,
+    seed: int | None = 42,
     gpkg_path=GPKG_PATH,
     countries_layer=LAYER,
     id_field=ID_FIELD,
     borders_fgb=BORDERS_FGB,
 ):
+    """
+    One big build: generate all points, label in many parallel shards,
+    then deterministically split to train/val/test and write one file each.
+    """
     out_dir = os.path.join(FOLDER_PATH, out_dir)
+    tmp_dir = os.path.join(out_dir, "tmp")
     os.makedirs(out_dir, exist_ok=True)
-    # We’ll build each split independently to avoid shipping huge arrays between processes
-    split_names = ["train", "val", "test"]
-    split_counts = [int(split_probs[i] * n_total) for i in range(3)]
-    # fix rounding so total matches
-    diff = n_total - sum(split_counts)
-    for i in range(diff): split_counts[i % 3] += 1
+    os.makedirs(tmp_dir, exist_ok=True)
 
-    # A small sampler just for **drawing** border-biased points (no labeling in parent)
-    sampler_for_drawing = BorderSampler(
-        gpkg_path=gpkg_path, countries_layer=countries_layer,
-        id_field=id_field, borders_fgb=borders_fgb
-    )
+    # RNGs
+    if seed is not None:
+        parent_ss = SeedSequence(seed)
+        parent_rng = default_rng(parent_ss)
+    else:
+        parent_ss = SeedSequence()
+        parent_rng = default_rng(parent_ss)
+
+    # Draw-only sampler in parent
+    sampler_for_drawing = BorderSampler(gpkg_path, countries_layer, id_field, borders_fgb)
 
     if max_workers is None:
-        try:
-            max_workers = max(1, os.cpu_count() - 1)
-        except Exception:
-            max_workers = 4
+        max_workers = max(1, (os.cpu_count() or 4) - 1)
 
-    for split_name, N in zip(split_names, split_counts):
-        if N == 0:
-            continue
-        out_split = os.path.join(out_dir, split_name)
-        os.makedirs(out_split, exist_ok=True)
+    # 1) Sample ALL points (no split yet)
+    n_border = int(mixture[0] * n_total)
+    n_uniform = n_total - n_border
 
-        n_border = int(mixture[0] * N)
-        n_uniform = N - n_border
+    lon_b, lat_b, xyz_b, is_border_b, r_band_b, dkm_b, ida_b, idb_b = \
+        sample_near_border_for_sampler(sampler_for_drawing, n_border, rng=parent_rng)
 
-        # Draw points (fast, in parent)
-        lon_b, lat_b, xyz_b, is_border_b, r_band_b = sample_near_border_for_sampler(sampler_for_drawing, n_border)
-        xyz_u = rand_unit_vec(n_uniform)
-        lon_u, lat_u = unitvec_to_lonlat(xyz_u)
-        is_border_u = np.zeros(n_uniform, np.uint8)
-        r_band_u = np.full(n_uniform, 255, np.uint8)
+    xyz_u = rand_unit_vec(n_uniform, rng=parent_rng)
+    lon_u, lat_u = unitvec_to_lonlat(xyz_u)
+    is_border_u = np.zeros(n_uniform, np.uint8)
+    r_band_u = np.full(n_uniform, 255, np.uint8)
+    dkm_u = np.zeros(n_uniform, np.float32)
+    ida_u = np.zeros(n_uniform, np.int32)
+    idb_u = np.zeros(n_uniform, np.int32)
 
-        lon = np.concatenate([lon_b, lon_u]).astype(np.float32)
-        lat = np.concatenate([lat_b, lat_u]).astype(np.float32)
-        xyz = np.vstack([xyz_b, xyz_u]).astype(np.float32)
-        is_border = np.concatenate([is_border_b, is_border_u])
-        r_band = np.concatenate([r_band_b, r_band_u])
+    lon = np.concatenate([lon_b, lon_u]).astype(np.float32)
+    lat = np.concatenate([lat_b, lat_u]).astype(np.float32)
+    xyz = np.vstack([xyz_b, xyz_u]).astype(np.float32)
+    is_border = np.concatenate([is_border_b, is_border_u])
+    r_band = np.concatenate([r_band_b, r_band_u])
+    dkm_hint = np.concatenate([dkm_b, dkm_u]).astype(np.float32)
+    ida = np.concatenate([ida_b, ida_u]).astype(np.int32)
+    idb = np.concatenate([idb_b, idb_u]).astype(np.int32)
 
-        # Shuffle within split to avoid any ordering bias
-        perm = np.random.permutation(len(lon))
-        lon, lat, xyz, is_border, r_band = lon[perm], lat[perm], xyz[perm], is_border[perm], r_band[perm]
+    # Shuffle globally
+    perm = parent_rng.permutation(len(lon))
+    lon, lat, xyz, is_border, r_band, dkm_hint, ida, idb = \
+        lon[perm], lat[perm], xyz[perm], is_border[perm], r_band[perm], dkm_hint[perm], ida[perm], idb[perm]
 
-        # Create work items (chunks)
-        num_chunks = math.ceil(len(lon) / chunk_size)
-        futures = []
-        with ProcessPoolExecutor(max_workers=max_workers) as ex:
-            for ci in range(num_chunks):
-                lo = ci * chunk_size
-                hi = min((ci + 1) * chunk_size, len(lon))
-                out_path = os.path.join(out_split, f"part-{ci:05d}.parquet")
-                args = (
-                    gpkg_path, countries_layer, id_field, borders_fgb,
-                    lon[lo:hi], lat[lo:hi], xyz[lo:hi], is_border[lo:hi], r_band[lo:hi],
-                    out_path
-                )
-                futures.append(ex.submit(_label_and_write_chunk, args))
+    # 2) Parallel labeling into many temp shards
+    total = len(lon)
+    shards = max(1, shards_per_total)
+    chunk_size = max(1, int(np.ceil(total / shards)))
+    futures, temp_paths = [], []
 
-            if tqdm:
-                for f in tqdm(as_completed(futures), total=len(futures), desc=f"Writing {split_name}"):
-                    _ = f.result()
-            else:
-                for f in as_completed(futures):
-                    _ = f.result()
+    with ProcessPoolExecutor(
+        max_workers=max_workers,
+        mp_context=mp.get_context("spawn"),
+        initializer=_init_worker,
+        initargs=(gpkg_path, countries_layer, id_field, borders_fgb),
+    ) as ex:
+        for ci in range(shards):
+            lo = ci * chunk_size
+            hi = min((ci + 1) * chunk_size, total)
+            if lo >= hi:
+                continue
+            temp_path = os.path.join(tmp_dir, f"full-part-{ci:05d}.parquet")
+            args = (
+                gpkg_path, countries_layer, id_field, borders_fgb,
+                lon[lo:hi], lat[lo:hi], xyz[lo:hi],
+                is_border[lo:hi], r_band[lo:hi],
+                dkm_hint[lo:hi], ida[lo:hi], idb[lo:hi],
+                temp_path
+            )
+            futures.append(ex.submit(_label_and_write_chunk, args))
 
-        print(f"✔ Wrote {num_chunks} shards to {out_split}")
+        it = as_completed(futures)
+        if tqdm:
+            it = tqdm(it, total=len(futures), desc="Labeling shards")
+        for f in it:
+            status, payload = f.result()
+            if status == "err":
+                raise RuntimeError(f"Worker failed: {payload['error']}\n{payload['traceback']}")
+            temp_paths.append(payload)
 
+    # 3) Deterministic split -> one Parquet per split
+    out_paths = _split_and_write(temp_paths, out_dir=out_dir, split_probs=(0.8,0.1,0.1))
+    print("Wrote:", out_paths)
+    
+    
 tests = [
     ("Mid-Atlantic ocean (0°N, 0°E)",            0.0,     0.0),
     ("Luxembourg City, LU",                      6.13,   49.61),
@@ -545,14 +756,17 @@ def main():
     # e.g., ~800k total points split into train/val/test
     start = time.time()
     #make_dataset(sampler, n_total=800, out_dir="dataset_dev")
+    total = 10_000
+    n_totals = [300, 1_000, 3_000, 10_000, 30_000]
     make_dataset_parallel(
-        n_total=800,
-        out_dir="dataset_dev_parallel",
-        chunk_size=150,     # tune to your RAM; 150k–300k is a good start on M4
-        max_workers=None,       # defaults to (CPU cores - 1)
+        n_total=total,
+        out_dir="dataset_dev_split",
+        shards_per_total=22,
+        max_workers=None,
+        seed=None,
     )
     end = time.time()
-    print(end - start, "s for 800")
+    print(end - start, f"s for {total}")
     # For your main paper results later:
     # make_dataset(sampler, n_total=6_500_000, out_dir="dataset_main")
     #for name, lon, lat in tests:
@@ -564,7 +778,10 @@ def main():
     #end = time.time()
     #print(end - start)
     
-main()
+if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)  # explicit & safe on macOS
+    main()
+
 
 '''
 Mid-Atlantic ocean (0°N, 0°E)            -> dist≈572.926241 km, c1=289, c2=136
