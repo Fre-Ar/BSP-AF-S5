@@ -3,11 +3,14 @@ numpy
 pandas
 pyarrow
 torch
+scipy
+numba
 
 # Geo stack
 shapely
 geopandas
 pyogrio
+
 
 # Nice-to-have / used in code
 tqdm>=4.65

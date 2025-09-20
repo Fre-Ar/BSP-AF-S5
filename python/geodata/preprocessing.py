@@ -12,7 +12,7 @@ GPKG_PATH   = "python/geodata/world_bank_geodata.gpkg"
 LAYER       = "countries"
 ID_FIELD    = "id"                    
 OUT_FGB     = "python/geodata/borders.fgb"
-MAX_STEP_DEG = 0.25                   # densify so no segment step exceeds this (in degrees)
+MAX_STEP_DEG = 0.25 # densify so no segment step exceeds this (in degrees). This is equivalent to ~27.75km at equator.
 
 # ---- UTILS ----
 def _densify_pair(a, b, max_step_deg):
