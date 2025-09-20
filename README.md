@@ -67,6 +67,8 @@
 #### Contents
 - 
 
-
+Adreyy Carpati
 
 ## Notes
+
+AFTER: think about self evolving architectures: autosmth

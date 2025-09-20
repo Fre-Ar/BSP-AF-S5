@@ -3,49 +3,12 @@
     {
       "id": "7354deb4-77ed-4065-997c-4a0c89dcb185",
       "title": "Backlog",
-      "cards": [
-        {
-          "id": "729dcef2-12dd-473a-9927-1cac13ae91dd",
-          "listId": "7354deb4-77ed-4065-997c-4a0c89dcb185",
-          "title": "Code a random (lat, lon) to (d, c1, c2) sampler for loss calculation",
-          "description": "",
-          "labels": [],
-          "checkboxes": [],
-          "comments": []
-        },
-        {
-          "id": "e9256f76-8a00-45eb-a275-d128995a1963",
-          "listId": "7354deb4-77ed-4065-997c-4a0c89dcb185",
-          "title": "Code alternative methods (Naive, Octree)",
-          "description": "",
-          "labels": [],
-          "checkboxes": [],
-          "comments": []
-        },
-        {
-          "id": "935e0acb-c5e6-488c-bcfc-c7f27898b241",
-          "listId": "7354deb4-77ed-4065-997c-4a0c89dcb185",
-          "title": "Consider border-biased sampling to improve NN",
-          "description": "",
-          "labels": [],
-          "checkboxes": [],
-          "comments": []
-        }
-      ]
+      "cards": []
     },
     {
       "id": "367b2dd6-f094-4af5-abd4-3c2e9652faf1",
       "title": "To Do",
       "cards": [
-        {
-          "id": "7bf3da5b-5353-4890-89af-092c910bcdb7",
-          "listId": "367b2dd6-f094-4af5-abd4-3c2e9652faf1",
-          "title": "Learn the specific architecture used by NIRs",
-          "description": "",
-          "labels": [],
-          "checkboxes": [],
-          "comments": []
-        },
         {
           "id": "4c2a2e93-3e31-4b60-b514-0f5f5e47e4b9",
           "listId": "367b2dd6-f094-4af5-abd4-3c2e9652faf1",
@@ -65,9 +28,9 @@
           "comments": []
         },
         {
-          "id": "064840af-c7c4-48f6-a982-8458409b3203",
+          "id": "7bf3da5b-5353-4890-89af-092c910bcdb7",
           "listId": "367b2dd6-f094-4af5-abd4-3c2e9652faf1",
-          "title": "Read related work",
+          "title": "Learn the specific architectures used by NIRs",
           "description": "",
           "labels": [],
           "checkboxes": [],
@@ -80,17 +43,32 @@
       "title": "In Progress",
       "cards": [
         {
-          "id": "660f51c7-176d-49f7-8dab-dc4fb8c30055",
+          "id": "729dcef2-12dd-473a-9927-1cac13ae91dd",
           "listId": "923c6dae-0aaf-4cfb-aa15-61d354de091b",
-          "title": "Learn how to set up and play with Pytorch",
+          "title": "Code a random (x, y, z) to (d, c1, c2) sampler for loss calculation",
           "description": "",
           "labels": [],
           "checkboxes": [],
           "comments": []
         },
         {
-          "id": "6a5ef29b-f9f6-4bdf-9591-37ef311564d3",
+          "id": "064840af-c7c4-48f6-a982-8458409b3203",
           "listId": "923c6dae-0aaf-4cfb-aa15-61d354de091b",
+          "title": "Read related work",
+          "description": "",
+          "labels": [],
+          "checkboxes": [],
+          "comments": []
+        }
+      ]
+    },
+    {
+      "id": "2bb72c2d-76d4-41ab-bf46-123fcccda57d",
+      "title": "Done",
+      "cards": [
+        {
+          "id": "6a5ef29b-f9f6-4bdf-9591-37ef311564d3",
+          "listId": "2bb72c2d-76d4-41ab-bf46-123fcccda57d",
           "title": "Find dataset of world borders",
           "description": "",
           "labels": [],
@@ -101,18 +79,41 @@
               "comment": "Which date type to use?\nGeoJSON, Shapefile, geoPackage, KML, FGB, GPX, Parquet, CSV"
             }
           ]
+        },
+        {
+          "id": "660f51c7-176d-49f7-8dab-dc4fb8c30055",
+          "listId": "2bb72c2d-76d4-41ab-bf46-123fcccda57d",
+          "title": "Learn how to set up and play with Pytorch",
+          "description": "",
+          "labels": [],
+          "checkboxes": [],
+          "comments": []
         }
       ]
-    },
-    {
-      "id": "2bb72c2d-76d4-41ab-bf46-123fcccda57d",
-      "title": "Done",
-      "cards": []
     }
   ],
   "archive": {
     "lists": [],
-    "cards": []
+    "cards": [
+      {
+        "id": "e9256f76-8a00-45eb-a275-d128995a1963",
+        "listId": "7354deb4-77ed-4065-997c-4a0c89dcb185",
+        "title": "Code alternative methods (Naive, Octree)",
+        "description": "",
+        "labels": [],
+        "checkboxes": [],
+        "comments": []
+      },
+      {
+        "id": "935e0acb-c5e6-488c-bcfc-c7f27898b241",
+        "listId": "7354deb4-77ed-4065-997c-4a0c89dcb185",
+        "title": "Consider border-biased sampling to improve NN",
+        "description": "",
+        "labels": [],
+        "checkboxes": [],
+        "comments": []
+      }
+    ]
   },
   "settings": {
     "labels": []

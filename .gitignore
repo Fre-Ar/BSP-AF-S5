@@ -1,6 +1,7 @@
 # Data files
-geoBoundariesCGAZ_ADM0.gpkg
-world_bank_geodata.gpkg
+*.gpkg
+*.fgb
+*.parquet
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
