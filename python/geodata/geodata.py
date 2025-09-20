@@ -413,7 +413,7 @@ def make_dataset(
             table = pa.Table.from_pandas(df.iloc[lo:hi], preserve_index=False)
             pq.write_table(table, os.path.join(out_split, f"part-{p:05d}.parquet"), compression="zstd")
 
-    print(f"Wrote Parquet shards to {out_dir}/{{train,val,test}}")
+    #print(f"Wrote Parquet shards to {out_dir}/{{train,val,test}}")
 
 def sample_near_border_for_sampler(sampler: BorderSampler, M: int, rng=None):
     rng = _ensure_rng(rng)
@@ -588,7 +588,7 @@ def _split_and_write(paths, out_dir, split_probs=(0.8, 0.1, 0.1), batch_rows: in
         except Exception:
             pass
 
-    print(f"✔ Wrote one Parquet per split in: {out_dir}")
+    #print(f"✔ Wrote one Parquet per split in: {out_dir}")
     return out_files
 
 def _write_split_table(table, writers, split_probs, schema):
@@ -736,7 +736,7 @@ def make_dataset_parallel(
 
     # 3) Deterministic split -> one Parquet per split
     out_paths = _split_and_write(temp_paths, out_dir=out_dir, split_probs=(0.8,0.1,0.1))
-    print("Wrote:", out_paths)
+    #print("Wrote:", out_paths)
     
     
 tests = [
@@ -756,17 +756,19 @@ def main():
     # e.g., ~800k total points split into train/val/test
     start = time.time()
     #make_dataset(sampler, n_total=800, out_dir="dataset_dev")
-    total = 10_000
+    total = 4_000
+    shards = 32
+    workers = 8
     n_totals = [300, 1_000, 3_000, 10_000, 30_000]
     make_dataset_parallel(
         n_total=total,
         out_dir="dataset_dev_split",
-        shards_per_total=22,
-        max_workers=None,
+        shards_per_total=shards,
+        max_workers=workers,
         seed=None,
     )
     end = time.time()
-    print(end - start, f"s for {total}")
+    print(end - start, f"s for {total} using {shards} shards and {workers} workers")
     # For your main paper results later:
     # make_dataset(sampler, n_total=6_500_000, out_dir="dataset_main")
     #for name, lon, lat in tests:

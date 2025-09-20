@@ -1,51 +1,100 @@
-from geodata import *
-import time
-from numpy.random import default_rng
+import os, time, statistics, itertools, multiprocessing as mp
+from datetime import datetime
+from geodata import make_dataset_parallel
 
-def bench(run_name, ns, *, mode="scaling", repeats=3, seed=37):
-    results = []
-    # constant settings
-    max_workers = 8
-    mixture = (0.70, 0.30)
+# --------- Config (edit here) ----------
+N_TOTAL = 10_000
+SHARDS_LIST = [32]
+WORKERS_LIST = [None]
+REPEATS = 1                        # how many times to run each combo (>=1)
+BASE_OUT = "bench"                 # base folder
+RUN_NAME_PREFIX = "run"            # used in output folder names
+SEED = None                        # keep None to include randomness in sampling
+# -------------------------------------
 
-    # warmup (discard)
-    _ = make_dataset_parallel(
-        n_total=100_000,
-        out_dir=f"bench/bench_warm_{run_name}",
-        seed=seed,
-        max_workers=max_workers,
-        mixture=mixture,
-        chunk_size=200_000 if mode=="scaling" else 10_000,
-        shards_per_split=None if mode=="scaling" else 1,
-    )
 
-    for n in ns:
-        times = []
-        for r in range(repeats):
-            t0 = time.perf_counter()
-            make_dataset_parallel(
-                n_total=n,
-                out_dir=f"bench/bench_{run_name}_{n}_{r}",
-                seed=seed,
-                max_workers=max_workers,
-                mixture=mixture,
-                chunk_size=200_000 if mode=="scaling" else 10_000,
-                shards_per_split=None if mode=="scaling" else 1,
-            )
-            t1 = time.perf_counter()
-            times.append(t1 - t0)
-        results.append((n, sorted(times)[len(times)//2]))  # median
-        print(f"{run_name} n={n:,} -> {results[-1][1]:.2f}s")
+def bench_once(n, shards_list, workers_list, base_out, run_name_prefix, seed):
+    """Run one pass over all (shards, workers) combos. Returns {(sh, wk): [times...]}."""
+    results = {}
+    combos = list(itertools.product(shards_list, workers_list))
+
+    for (sh, wk) in combos:
+        key = (sh, wk)
+        results.setdefault(key, [])
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        out_dir = os.path.join(
+            base_out,
+            f"bench_{run_name_prefix}_{sh}_{'auto' if wk is None else wk}_{ts}"
+        )
+        os.makedirs(out_dir, exist_ok=True)
+
+        t0 = time.perf_counter()
+        make_dataset_parallel(
+            n_total=n,
+            out_dir=out_dir,
+            shards_per_total=sh,
+            max_workers=wk,   # None -> auto (CPU-1)
+            seed=seed,
+        )
+        dt = time.perf_counter() - t0
+        results[key].append(dt)
+
     return results
 
+
+def summarize(all_runs):
+    """Merge run dicts and compute medians."""
+    merged = {}
+    for run in all_runs:
+        for key, times in run.items():
+            merged.setdefault(key, [])
+            merged[key].extend(times)
+
+    summary = {}
+    for key, times in merged.items():
+        summary[key] = {
+            "times": times,
+            "median": statistics.median(times) if times else float("nan"),
+        }
+    return summary
+
+
+def print_summary(summary):
+    rows = []
+    for (sh, wk), info in summary.items():
+        rows.append((info["median"], sh, wk, info["times"]))
+    rows.sort(key=lambda r: r[0])
+
+    print("\n=== Benchmark Summary (sorted by median seconds) ===")
+    for med, sh, wk, times in rows:
+        wk_str = "auto" if wk is None else str(wk)
+        times_str = ", ".join(f"{t:.2f}" for t in times)
+        print(f"shards={sh:>3}  workers={wk_str:>4}  median={med:8.2f}s   runs=[{times_str}]")
+    print("====================================================\n")
+
+
+def main():
+    os.makedirs(BASE_OUT, exist_ok=True)
+
+    all_runs = []
+    for rep in range(REPEATS):
+        print(f"\n=== Repetition {rep+1}/{REPEATS} ===")
+        run_name = f"{RUN_NAME_PREFIX}_r{rep+1}"
+        res = bench_once(
+            n=N_TOTAL,
+            shards_list=SHARDS_LIST,
+            workers_list=WORKERS_LIST,
+            base_out=BASE_OUT,
+            run_name_prefix=run_name,
+            seed=SEED,
+        )
+        all_runs.append(res)
+
+    summary = summarize(all_runs)
+    print_summary(summary)
+
+
 if __name__ == "__main__":
-    overhead_ns = [300, 1_000, 3_000, 10_000, 30_000]
-    scaling_ns  = [10_000, 30_000, 100_000, 300_000, 1_000_000, 3_000_000]
-
-    overhead = bench("overhead", overhead_ns, mode="overhead")
-    scaling  = bench("scaling",  scaling_ns,  mode="scaling")
-
-    # Optional: dump to CSV to plot later
-    import pandas as pd
-    pd.DataFrame(overhead, columns=["n_total","seconds"]).to_csv("overhead.csv", index=False)
-    pd.DataFrame(scaling,  columns=["n_total","seconds"]).to_csv("scaling.csv", index=False)
+    mp.set_start_method("spawn", force=True)
+    main()
