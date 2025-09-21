@@ -1,7 +1,10 @@
 # Data files
 *.gpkg
+*.gpkg-shm
+*.gpkg-wal
 *.fgb
 *.parquet
+parquet/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -5,12 +5,13 @@ pyarrow
 torch
 scipy
 numba
+matplotlib
 
 # Geo stack
 shapely
 geopandas
 pyogrio
-
+geodatasets
 
 # Nice-to-have / used in code
 tqdm>=4.65

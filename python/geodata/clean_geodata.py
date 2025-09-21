@@ -18,6 +18,7 @@ Design choices (why this looks the way it does):
 """
 
 from __future__ import annotations
+from utils import _save_points_parquet, _load_points_parquet
 
 # --- stdlib
 import os
@@ -643,6 +644,9 @@ def make_dataset_parallel(
     tmp_subdir: str = "tmp_shards",
     writer_compression: str = "zstd",
     writer_row_group_size: int | None = 512_000,
+    points_path: str | None = None,         # if given, load starting points from here
+    export_points_path: str | None = None,  # if given (and points_path is None), save the sampled points here
+    shuffle_points: bool = True,            # set False to keep exact order when exporting/consuming
 ) -> str:
     """
     Generate n_total samples and write ONE Parquet at `out_path`.
@@ -657,48 +661,69 @@ def make_dataset_parallel(
 
     # RNG: fixed seed => same dataset every time; None => new randomness
     rng = np.random.default_rng(seed)
-
-    t0 = time.perf_counter()
-    # Sampler used **only** to draw near-border points in the parent (no labeling here)
-    sampler_for_drawing = BorderSampler(
-        gpkg_path=gpkg_path,
-        countries_layer=countries_layer,
-        id_field=id_field,
-        borders_fgb=borders_fgb,
-    )
-    dt = time.perf_counter() - t0
-    print(f"Sampler creation: {dt:.3f}s")
-    t0 = time.perf_counter()
+    
     
     # 1) Draw points (parent process, fast)
-    n_border = int(mixture[0] * n_total)
-    n_uniform = n_total - n_border
+    # Obtain starting points (either load or generate)
+    if points_path is not None:
+        # --- apples-to-apples path: load pre-generated points and skip any RNG usage here ---
+        t0 = time.perf_counter()
+        (lon, lat, xyz, is_border, r_band, dkm_hint, ida, idb) = _load_points_parquet(points_path)
+        dt = time.perf_counter() - t0
+        print(f"Loaded starting points from '{points_path}' in {dt:.3f}s")
+        # honor user choice about shuffling (default True to mix shards; False for strictly identical order)
+        if shuffle_points:
+            rng = np.random.default_rng(seed)
+            perm = rng.permutation(len(lon))
+            lon, lat, xyz, is_border, r_band, dkm_hint, ida, idb = \
+                lon[perm], lat[perm], xyz[perm], is_border[perm], r_band[perm], dkm_hint[perm], ida[perm], idb[perm]
+    else:
+        # --- normal path: generate points here, optionally export for reuse by other labelers ---
+        # Sampler used **only** to draw near-border points in the parent (no labeling here)
+        t0 = time.perf_counter()
+        sampler_for_drawing = BorderSampler(
+            gpkg_path=gpkg_path,
+            countries_layer=countries_layer,
+            id_field=id_field,
+            borders_fgb=borders_fgb,
+        )
+        dt = time.perf_counter() - t0
+        print(f"Sampler creation: {dt:.3f}s")
+        t0 = time.perf_counter()
 
-    (lon_b, lat_b, xyz_b, is_b_b, r_band_b, dkm_b, ida_b, idb_b) = \
-        _draw_near_border_points(sampler_for_drawing, n_border, rng)
+        n_border = int(mixture[0] * n_total)
+        n_uniform = n_total - n_border
 
-    xyz_u = rng.normal(size=(n_uniform, 3)).astype(np.float64)
-    xyz_u = _safe_div(xyz_u, _safe_norm(xyz_u)).astype(np.float32)
-    lon_u, lat_u = unitvec_to_lonlat(xyz_u)
-    is_b_u = np.zeros(n_uniform, np.uint8)
-    r_band_u = np.full(n_uniform, 255, np.uint8)  # 255 marks 'uniform' bucket
-    dkm_u = np.zeros(n_uniform, np.float32)
-    ida_u = np.zeros(n_uniform, np.int32)
-    idb_u = np.zeros(n_uniform, np.int32)
+        (lon_b, lat_b, xyz_b, is_b_b, r_band_b, dkm_b, ida_b, idb_b) = \
+            _draw_near_border_points(sampler_for_drawing, n_border, rng)
 
-    lon = np.concatenate([lon_b, lon_u]).astype(np.float32)
-    lat = np.concatenate([lat_b, lat_u]).astype(np.float32)
-    xyz = np.vstack([xyz_b, xyz_u]).astype(np.float32)
-    is_border = np.concatenate([is_b_b, is_b_u])
-    r_band    = np.concatenate([r_band_b, r_band_u])
-    dkm_hint  = np.concatenate([dkm_b, dkm_u]).astype(np.float32)
-    ida       = np.concatenate([ida_b, ida_u]).astype(np.int32)
-    idb       = np.concatenate([idb_b, idb_u]).astype(np.int32)
+        xyz_u = rng.normal(size=(n_uniform, 3)).astype(np.float64)
+        xyz_u = _safe_div(xyz_u, _safe_norm(xyz_u)).astype(np.float32)
+        lon_u, lat_u = unitvec_to_lonlat(xyz_u)
+        is_b_u = np.zeros(n_uniform, np.uint8)
+        r_band_u = np.full(n_uniform, 255, np.uint8)  # 255 marks 'uniform' bucket
+        dkm_u = np.zeros(n_uniform, np.float32)
+        ida_u = np.zeros(n_uniform, np.int32)
+        idb_u = np.zeros(n_uniform, np.int32)
 
-    # Shuffle (so shards have similar composition)
-    perm = rng.permutation(len(lon))
-    lon, lat, xyz, is_border, r_band, dkm_hint, ida, idb = \
-        lon[perm], lat[perm], xyz[perm], is_border[perm], r_band[perm], dkm_hint[perm], ida[perm], idb[perm]
+        lon = np.concatenate([lon_b, lon_u]).astype(np.float32)
+        lat = np.concatenate([lat_b, lat_u]).astype(np.float32)
+        xyz = np.vstack([xyz_b, xyz_u]).astype(np.float32)
+        is_border = np.concatenate([is_b_b, is_b_u])
+        r_band    = np.concatenate([r_band_b, r_band_u])
+        dkm_hint  = np.concatenate([dkm_b, dkm_u]).astype(np.float32)
+        ida       = np.concatenate([ida_b, ida_u]).astype(np.int32)
+        idb       = np.concatenate([idb_b, idb_u]).astype(np.int32)
+
+        if shuffle_points:
+            perm = rng.permutation(len(lon))
+            lon, lat, xyz, is_border, r_band, dkm_hint, ida, idb = \
+                lon[perm], lat[perm], xyz[perm], is_border[perm], r_band[perm], dkm_hint[perm], ida[perm], idb[perm]
+
+        if export_points_path:
+            ep = _save_points_parquet(export_points_path, lon, lat, xyz, is_border, r_band, dkm_hint, ida, idb)
+            print(f"Exported starting points to '{ep}'")
+
 
     dt = time.perf_counter() - t0
     print(f"Parent Processes: {dt:.3f}s")
@@ -795,9 +820,30 @@ def make_dataset_parallel(
 
     return os.path.abspath(out_path)
 
+def query_point(
+    lon: float,
+    lat: float,
+    gpkg_path: str = GPKG_PATH,
+    countries_layer: str = COUNTRIES_LAYER,
+    id_field: str = ID_FIELD,
+    borders_fgb: str = BORDERS_FGB,
+):
+    """
+    Print the labeling result for a single (lon, lat).
+    Usage (CLI): python clean_geodata.py --lon -56.32122 --lat 47.07616
+    """
+    bs = BorderSampler(
+        gpkg_path=gpkg_path,
+        countries_layer=countries_layer,
+        id_field=id_field,
+        borders_fgb=borders_fgb,
+    )
+    d_km, c1, c2 = bs.sample_lonlat(float(lon), float(lat))
+    print(f"== lon: {float(lon):.6f}, lat: {float(lat):.6f}, dist_km: {d_km:.6f}, c1: {c1}, c2: {c2} ==")
+
 # --------------------------- script example -------------------------
 
-if __name__ == "__main__":
+def run():
     # safety for multiprocessing
     mp.set_start_method("spawn", force=True)
 
@@ -812,3 +858,7 @@ if __name__ == "__main__":
     )
     dt = time.perf_counter() - t0
     print(f"Total time Elapsed: {dt:.3f}s")
+
+if __name__ == "__main__":
+    run()
+    #query_point(-56.32122, 47.07616)  # Newfoundland, Canada

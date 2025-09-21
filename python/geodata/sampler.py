@@ -2,19 +2,17 @@
 Minimal, production-ready generator for (lon, lat, x, y, z, dist_km, c1_id, c2_id, is_border, r_band)
 saved as **one Parquet file**.
 
-Major design choices:
-- We bias sampling near borders (70/30 by default).
+Key choices:
+- We bias sampling near borders (default 70/30).
 - Distances are **spherical** to short-arc border segments.
-- Labeling is parallel: each worker builds its own spatial indices once, then writes a temp shard.
-  The parent concatenates shards into **one Parquet file** (stable, memory-bounded).
-- NEW (perf): Segment shortlist via **KNN on segment midpoints in 3D** (cKDTree), not STRtree buffers.
-  This bounds candidates to O(K) per point (K≈64) and vectorizes the distance kernel.
-- NEW (perf): Optional **Numba** JIT for the distance kernel (falls back to NumPy if unavailable).
-- Windows/macOS-safe (spawn start method, __main__ guard).
+- Labeling is parallel: each worker initializes once, labels a shard, writes a temp Parquet; parent concatenates.
+- **Shortlist is KD-tree only** (cKDTree on segment midpoints in 3D unit sphere). No STRtree anywhere.
+- Optional Numba JIT for the exact distance kernel (falls back to NumPy if absent).
+- Windows/macOS-safe (spawn start method).
 """
 
 from __future__ import annotations
-from utils import _save_points_parquet, _load_points_parquet
+from utils import _save_points_parquet, _load_points_parquet  # your helper I/O
 
 # --- stdlib
 import os
@@ -35,12 +33,11 @@ from shapely.prepared import prep
 try:
     # fast KNN over unit vectors (midpoints)
     from scipy.spatial import cKDTree
-except Exception as _e:  # give a nicer error message later if user calls make_dataset_parallel
+except Exception:
     cKDTree = None
 
 try:
-    # optional progress bar; gracefully degrades to range()
-    from tqdm import tqdm
+    from tqdm import tqdm  # optional
 except Exception:
     tqdm = None
 
@@ -56,21 +53,21 @@ except Exception:
 R_EARTH_KM = 6371.0088                 # mean Earth radius
 FOLDER_PATH = "python/geodata"         # base I/O folder (change if you like)
 
-# Inputs you already have
 GPKG_PATH   = os.path.join(FOLDER_PATH, "world_bank_geodata.gpkg")
 BORDERS_FGB = os.path.join(FOLDER_PATH, "borders.fgb")
 COUNTRIES_LAYER = "countries"
 ID_FIELD    = "id"                     # numeric country id in your GPKG
 
+VALIDATE_NEAR_BORDER = True
+HINT_DELTA_FACTOR = 0.8  # if computed_d < 0.8 * hint_d, override
+
 # --------------------------- small utilities ------------------------
 
 def _safe_norm(v: np.ndarray, axis=1, keepdims=True, eps=1e-15):
-    """Avoid division by ~0 when normalizing tiny vectors."""
     n = np.linalg.norm(v, axis=axis, keepdims=keepdims)
     return np.where(n < eps, eps, n)
 
 def _safe_div(v: np.ndarray, n: np.ndarray, eps=1e-15):
-    """Guarded division used across spherical ops."""
     n = np.where(n < eps, 1.0, n)
     return v / n
 
@@ -96,11 +93,8 @@ def move_along_geodesic(p: np.ndarray, t: np.ndarray, theta: np.ndarray) -> np.n
     out = _safe_div(out, _safe_norm(out))
     return out.astype(np.float32)
 
+# Scalar reference for tests/debug
 def greatcircle_point_segment_dist_km(p_lon, p_lat, a_lon, a_lat, b_lon, b_lat) -> float:
-    """
-    Scalar reference implementation (kept for tests).
-    Unsigned spherical distance (km) from P to the **short** arc A-B.
-    """
     def _ll2v(lon, lat):
         lon = np.radians(lon); lat = np.radians(lat)
         cl = np.cos(lat)
@@ -112,21 +106,18 @@ def greatcircle_point_segment_dist_km(p_lon, p_lat, a_lon, a_lat, b_lon, b_lat) 
 
     n = np.cross(a, b); nn = np.linalg.norm(n)
     if nn == 0.0:
-        # identical endpoints -> min distance to endpoints
         return R_EARTH_KM * min(
             np.arccos(np.clip(np.dot(p, a), -1.0, 1.0)),
             np.arccos(np.clip(np.dot(p, b), -1.0, 1.0)),
         )
     n /= nn
 
-    # project foot of perpendicular from P onto the great circle (A,B)
     c = np.cross(n, p); c = np.cross(c, n); c /= np.linalg.norm(c)
 
     ab = np.arccos(np.clip(np.dot(a, b), -1.0, 1.0))
     ac = np.arccos(np.clip(np.dot(a, c), -1.0, 1.0))
     cb = np.arccos(np.clip(np.dot(c, b), -1.0, 1.0))
 
-    # If C lies on the short arc, distance is P-C; else min endpoint distance.
     if abs((ac + cb) - ab) < 1e-10:
         theta = np.arccos(np.clip(np.dot(p, c), -1.0, 1.0))
     else:
@@ -157,12 +148,10 @@ def _theta_point_to_short_arc_numpy(p: np.ndarray, A: np.ndarray, B: np.ndarray,
     NumPy vectorized: return array of angles (rad) from point p (3,) to short-arc A-B for K candidates.
     Inputs are float64; A,B,N shape (K,3); theta_ab shape (K,).
     """
-    # projection of p to each GC(A,B): C = norm( (N x p) x N )
-    C = np.cross(N, p)                   # (K,3)
-    C = np.cross(C, N)                   # (K,3)
-    C = _safe_div(C, _safe_norm(C))      # (K,3)
+    C = np.cross(N, p)
+    C = np.cross(C, N)
+    C = _safe_div(C, _safe_norm(C))
 
-    # helper
     def aco(x): return np.arccos(np.clip(x, -1.0, 1.0))
 
     ac = aco(np.sum(A * C, axis=1))
@@ -183,14 +172,12 @@ if _HAS_NUMBA:
         out = np.empty(K, dtype=np.float64)
 
         for i in range(K):
-            # C = normalize( (N_i x p) x N_i )
             NxP = np.array([N[i,1]*p[2] - N[i,2]*p[1],
                             N[i,2]*p[0] - N[i,0]*p[2],
                             N[i,0]*p[1] - N[i,1]*p[0]])
             C = np.array([NxP[1]*N[i,2] - NxP[2]*N[i,1],
                           NxP[2]*N[i,0] - NxP[0]*N[i,2],
                           NxP[0]*N[i,1] - NxP[1]*N[i,0]])
-            # normalize C
             n = (C[0]*C[0] + C[1]*C[1] + C[2]*C[2]) ** 0.5
             if n < 1e-15:
                 C = np.array([0.0, 0.0, 1.0])
@@ -221,10 +208,7 @@ class BorderSampler:
     Spatial labeller:
     - c1_id from country coverage (prepared geometries).
     - Nearest border via **KNN on segment midpoints** (unit vectors in 3D), then exact spherical
-      distance to the short arc for a tiny candidate set (K≈64).
-    Why this design?
-      STRtree+buffer returns *thousands* of segments in dense areas, exploding the distance loop.
-      KNN bounds candidates deterministically and lets us vectorize/JIT the kernel.
+      distance to the short arc for a tiny candidate set (K).
     """
 
     def __init__(
@@ -233,9 +217,9 @@ class BorderSampler:
         countries_layer: str = COUNTRIES_LAYER,
         id_field: str = ID_FIELD,
         borders_fgb: str = BORDERS_FGB,
-        knn_k: int = 64,              # default candidate budget
-        knn_expand: int = 128,        # one-shot expansion if needed
-        expand_rel: float = 1.05,     # expand if kth chord <= expand_rel * best chord
+        knn_k: int = 128,              # default candidate budget (tweakable)
+        knn_expand: int = 256,         # one-shot expansion if needed
+        expand_rel: float = 1.05,      # expand if kth chord <= expand_rel * best chord
     ):
         if cKDTree is None:
             raise RuntimeError("scipy.spatial.cKDTree is required. `pip install scipy`.")
@@ -253,7 +237,7 @@ class BorderSampler:
 
         # Prepared geometries => fast covers()
         self._id2geom_prepared: dict[int, any] = {}
-        for ridx, row in self.countries.iterrows():
+        for _, row in self.countries.iterrows():
             cid = int(row[id_field])
             self._id2geom_prepared[cid] = prep(row.geometry)
 
@@ -284,16 +268,15 @@ class BorderSampler:
         cos_ab = np.clip((A3 * B3).sum(axis=1), -1.0, 1.0)
         theta_ab = np.arccos(cos_ab)
 
-        # Midpoints for KNN (normalize A+B; if degenerate, fall back to A)
+        # Midpoints for KNN (normalize A+B; if degenerate (near antipodal), fall back to A)
         M3 = A3 + B3
         nn = _safe_norm(M3)
         M3 = _safe_div(M3, nn)
-        # For near-antipodal (A≈-B) segments, A+B ~ 0; fallback to A
         near_zero = (nn[:, 0] < 1e-12)
         if np.any(near_zero):
             M3[near_zero] = A3[near_zero]
 
-        # Build KD-tree on midpoints
+        # KD-tree on midpoints
         self._mid_tree = cKDTree(M3, balanced_tree=True)
         self._A3 = A3; self._B3 = B3; self._N3 = N3
         self._theta_ab = theta_ab
@@ -301,11 +284,8 @@ class BorderSampler:
     # ---- helpers
 
     def _country_id_at_lonlat(self, lon, lat) -> int | None:
-        """Find c1_id via prepared geometry coverage."""
+        """Find c1_id via prepared geometry coverage (simple loop; quite fast in practice)."""
         pt = Point(lon, lat)
-        # Small optimization: try all candidates whose bbox intersects the point would require STRtree,
-        # but prepared.covers(pt) is already fast; just check all is fine for this call frequency.
-        # If this ever shows up in profiles, we can add a polygon STRtree + prepared filter.
         for cid, pgeom in self._id2geom_prepared.items():
             if pgeom.covers(pt):
                 return cid
@@ -317,8 +297,7 @@ class BorderSampler:
         For unit vectors, chord distance d relates to angular distance α via d = 2 sin(α/2).
         """
         d, idx = self._mid_tree.query(p, k=min(k, self._mid_tree.n), workers=1)
-        # SciPy returns scalars when k==1; normalize to 1D arrays
-        if np.isscalar(d):
+        if np.isscalar(d):  # normalize to 1D arrays
             d = np.array([d], dtype=np.float64); idx = np.array([idx], dtype=np.int64)
         return idx.astype(np.int64), d.astype(np.float64)
 
@@ -327,11 +306,9 @@ class BorderSampler:
         Vectorized nearest short-arc distance using precomputed A3, B3, N3 and KDTree shortlist.
         Adaptive expansion: if kth chord is ~as small as the best chord, re-query with 2K once.
         """
-        # Point as unit vector
         p = lonlat_to_unitvec(np.array([lon], dtype=np.float64),
                               np.array([lat], dtype=np.float64))[0]  # (3,)
 
-        # First pass (K)
         idx, chord = self._knn_candidate_indices(p, self.knn_k)
         A = self._A3[idx]; B = self._B3[idx]; N = self._N3[idx]; th = self._theta_ab[idx]
 
@@ -345,12 +322,10 @@ class BorderSampler:
         best_idx = int(idx[best_i])
         best_d = float(R_EARTH_KM * best_theta)
 
-        # Heuristic: if kth chord ≈ best chord, expand to 2K once to de-risk misses
-        # chord and angle are monotonic, so this works as a conservative guard.
-        kth = float(np.max(chord))  # last of K (SciPy doesn't guarantee sorted, but typical)
+        # heuristic expansion
+        kth = float(np.max(chord))  # coarse proxy; SciPy usually returns sorted
         if kth <= self.expand_rel * float(chord[best_i]) and self.knn_expand > self.knn_k:
-            idx2, chord2 = self._knn_candidate_indices(p, self.knn_expand)
-            # merge unique
+            idx2, _ = self._knn_candidate_indices(p, self.knn_expand)
             uni = np.unique(idx2)
             A = self._A3[uni]; B = self._B3[uni]; N = self._N3[uni]; th = self._theta_ab[uni]
             if _HAS_NUMBA:
@@ -374,7 +349,6 @@ class BorderSampler:
         c2_id is the *other* country of the nearest border segment.
         """
         c1 = self._country_id_at_lonlat(lon, lat)
-
         best_d, a, b = self._nearest_segment_vectorized(lon, lat)
 
         if c1 == a:
@@ -382,8 +356,7 @@ class BorderSampler:
         elif c1 == b:
             c2 = a
         else:
-            # Rare tiny-island/topology corner case: just return the nearest pair.
-            c2 = b
+            c2 = b  # rare corner cases (tiny islands, topology quirks)
 
         return float(best_d), int(c1) if c1 is not None else -1, int(c2)
 
@@ -391,20 +364,15 @@ class BorderSampler:
 
 def _draw_near_border_points(sampler: BorderSampler, M: int, rng: np.random.Generator):
     """
-    Draw M points near borders:
-    1) choose segments proportional to angular length,
-    2) SLERP along segment to a random point,
-    3) offset by a random small geodesic distance into one side (±).
-
-    Returns:
-      lon, lat, xyz, is_border(=1), r_band, d_km_hint, id_a, id_b
+    Draw M points near borders by sampling segments ~ angular length, SLERP to a random point,
+    then offset by a small random geodesic distance into a random side.
+    Returns: lon, lat, xyz, is_border(=1), r_band, d_km_hint, id_a, id_b
     """
     ax = sampler._ax.astype(np.float64); ay = sampler._ay.astype(np.float64)
     bx = sampler._bx.astype(np.float64); by = sampler._by.astype(np.float64)
     A  = lonlat_to_unitvec(ax, ay).astype(np.float64)
     B  = lonlat_to_unitvec(bx, by).astype(np.float64)
 
-    # Remove near-degenerate segments (numerically unstable + useless)
     dot_all = np.clip((A * B).sum(axis=1), -1.0, 1.0)
     theta_seg_all = np.arccos(dot_all)
     valid = theta_seg_all > 1e-9
@@ -412,32 +380,28 @@ def _draw_near_border_points(sampler: BorderSampler, M: int, rng: np.random.Gene
     ida_all = sampler._id_a[valid].astype(np.int32)
     idb_all = sampler._id_b[valid].astype(np.int32)
 
-    # Sample segments ~ proportional to angular span
     theta_seg = theta_seg_all[valid] + 1e-15
     probs = (theta_seg / theta_seg.sum()).astype(np.float64)
     idx = rng.choice(len(A), size=M, p=probs)
 
     a = A[idx]; b = B[idx]
-    # SLERP to random point along each segment
     dot_ab = np.clip((a * b).sum(axis=1), -1.0, 1.0)
-    theta  = np.arccos(dot_ab)
+    th = np.arccos(dot_ab)
     t = rng.random(M)
-    sin_th = np.sin(theta)
+    sin_th = np.sin(th)
     small = sin_th < 1e-12
-    coef_a = np.empty_like(theta); coef_b = np.empty_like(theta)
-    coef_a[~small] = np.sin((1.0 - t[~small]) * theta[~small]) / sin_th[~small]
-    coef_b[~small] = np.sin(t[~small] * theta[~small]) / sin_th[~small]
+    coef_a = np.empty_like(th); coef_b = np.empty_like(th)
+    coef_a[~small] = np.sin((1.0 - t[~small]) * th[~small]) / sin_th[~small]
+    coef_b[~small] = np.sin(t[~small] * th[~small]) / sin_th[~small]
     coef_a[small]  = 1.0 - t[small]; coef_b[small] = t[small]
     p = a * coef_a[:, None] + b * coef_b[:, None]
     p = _safe_div(p, _safe_norm(p))
 
-    # Tangent basis + choose a side (±) to step away from the border
     n = np.cross(a, b); n = _safe_div(n, _safe_norm(n))
     tgc = np.cross(n, p); tgc = _safe_div(tgc, _safe_norm(tgc))
     u = np.cross(tgc, p); u = _safe_div(u, _safe_norm(u))
     u *= np.where(rng.random(M) < 0.5, 1.0, -1.0)[:, None]
 
-    # Distance hints (km) so the worker can fast-path for most near-border points
     d_km_hint, r_band = _sample_distance_km(M, rng)
     theta_off = (d_km_hint.astype(np.float64) / R_EARTH_KM)
     p_off = move_along_geodesic(p.astype(np.float32), u.astype(np.float32), theta_off.astype(np.float32))
@@ -455,12 +419,13 @@ _BS: BorderSampler | None = None
 _PID = None
 _PROCNAME = None
 
-def _init_worker(gpkg_path, layer, id_field, borders_fgb):
-    """
-    Build spatial indices ONCE per worker (heavy GEOS/GDAL/trees).
-    """
+def _init_worker(gpkg_path, layer, id_field, borders_fgb, knn_k, knn_expand, expand_rel):
+    """Build spatial indices ONCE per worker (GEOS/GDAL/KD-tree)."""
     global _BS, _PID, _PROCNAME
-    _BS = BorderSampler(gpkg_path, layer, id_field, borders_fgb, knn_k=128, knn_expand=256, expand_rel=1.05)
+    _BS = BorderSampler(
+        gpkg_path, layer, id_field, borders_fgb,
+        knn_k=knn_k, knn_expand=knn_expand, expand_rel=expand_rel
+    )
     import multiprocessing as _mp
     _PID = os.getpid()
     _PROCNAME = _mp.current_process().name
@@ -468,10 +433,7 @@ def _init_worker(gpkg_path, layer, id_field, borders_fgb):
 def _label_and_write_chunk(args):
     """
     Label a chunk and write a TEMP Parquet shard.
-
-    Instrumentation:
-      - counts: points, fast (near-border) vs full (uniform) paths
-      - timings: polygon covers, distance kernel, parquet write
+    Stats: counts (fast/full), polygon covers time, distance time, write time.
     """
     import time
     t0 = time.perf_counter()
@@ -479,21 +441,14 @@ def _label_and_write_chunk(args):
         (gpkg_path, layer, id_field, borders_fgb,
          lon_chunk, lat_chunk, xyz_chunk, is_border_chunk, r_band_chunk,
          dkm_hint_chunk, ida_chunk, idb_chunk,
-         temp_path, chunk_idx) = args
+         temp_path, chunk_idx, knn_k, knn_expand, expand_rel) = args
 
         global _BS, _PID, _PROCNAME
         if _BS is None:
-            _init_worker(gpkg_path, layer, id_field, borders_fgb)
+            _init_worker(gpkg_path, layer, id_field, borders_fgb, knn_k, knn_expand, expand_rel)
 
-        # ---------- stats ----------
-        stats = {
-            "points": int(len(lon_chunk)),
-            "fast": 0,
-            "full": 0,
-            "poly_query_s": 0.0,
-            "dist_s": 0.0,
-            "write_s": 0.0,
-        }
+        stats = {"points": int(len(lon_chunk)), "fast": 0, "full": 0,
+                 "poly_query_s": 0.0, "dist_s": 0.0, "write_s": 0.0}
 
         N = len(lon_chunk)
         dist = np.empty(N, dtype=np.float32)
@@ -501,19 +456,20 @@ def _label_and_write_chunk(args):
         c2   = np.empty(N, dtype=np.int32)
 
         mb = (is_border_chunk == 1)
-        # ---------- Near-border fast path ----------
+
+        # Near-border fast path: trust offset magnitude, decide side by prepared covers
         if np.any(mb):
             idxs = np.where(mb)[0]
             stats["fast"] += int(idxs.size)
-            dist[mb] = dkm_hint_chunk[mb]  # trust offset magnitude
+            dist[mb] = dkm_hint_chunk[mb]
             for i in idxs:
                 lon = float(lon_chunk[i]); lat = float(lat_chunk[i])
-                # Decide side via prepared covers on the two known neighbors
-                t_poly0 = time.perf_counter()
                 ida = int(ida_chunk[i]); idb = int(idb_chunk[i])
                 pgeom_a = _BS._id2geom_prepared.get(ida)
                 pgeom_b = _BS._id2geom_prepared.get(idb)
                 pt = Point(lon, lat)
+
+                t0p = time.perf_counter()
                 decided = False
                 if pgeom_a is not None and pgeom_a.covers(pt):
                     c1[i], c2[i] = ida, idb
@@ -521,29 +477,53 @@ def _label_and_write_chunk(args):
                 elif pgeom_b is not None and pgeom_b.covers(pt):
                     c1[i], c2[i] = idb, ida
                     decided = True
-                t_poly1 = time.perf_counter()
-                stats["poly_query_s"] += (t_poly1 - t_poly0)
+                stats["poly_query_s"] += (time.perf_counter() - t0p)
 
-                if not decided:
-                    # fallback to full nearest (rare)
-                    t_d0 = time.perf_counter()
-                    d_km, a, b = _BS._nearest_segment_vectorized(lon, lat)
-                    t_d1 = time.perf_counter()
-                    stats["dist_s"] += (t_d1 - t_d0)
-                    dist[i] = d_km
-                    c1[i], c2[i] = (a, b)
+                # Default: trust the hint
+                d_hint = float(dkm_hint_chunk[i])
+                use_hint = True
 
-        # ---------- Uniform full path ----------
+                if VALIDATE_NEAR_BORDER:
+                    # One KNN nearest-segment check
+                    t0d = time.perf_counter()
+                    d_knn, a_knn, b_knn = _BS._nearest_segment_vectorized(lon, lat)
+                    stats["dist_s"] += (time.perf_counter() - t0d)
+
+                    # If nearest border pair doesn't match (ida,idb) in either order,
+                    # or the computed distance is much smaller than the hint,
+                    # override with computed nearest.
+                    same_pair = ((a_knn == ida and b_knn == idb) or (a_knn == idb and b_knn == ida))
+                    if (not same_pair) or (d_knn < HINT_DELTA_FACTOR * d_hint):
+                        dist[i] = d_knn
+                        # If polygon side is unknown or inconsistent, go with nearest pair.
+                        if not decided:
+                            c1[i], c2[i] = a_knn, b_knn
+                        use_hint = False
+                    else:
+                        # keep hint distance; ids already set if decided, else pick side by nearest pair
+                        if not decided:
+                            # If we didn't settle side via polygons, choose the country from nearest pair
+                            # that contains the point (rare). If neither contains, default to nearest pair order.
+                            if _BS._id2geom_prepared.get(a_knn, None) and _BS._id2geom_prepared[a_knn].covers(pt):
+                                c1[i], c2[i] = a_knn, b_knn
+                            elif _BS._id2geom_prepared.get(b_knn, None) and _BS._id2geom_prepared[b_knn].covers(pt):
+                                c1[i], c2[i] = b_knn, a_knn
+                            else:
+                                c1[i], c2[i] = a_knn, b_knn
+
+                if use_hint:
+                    dist[i] = d_hint
+
+        # Uniform full path
         mu = ~mb
         if np.any(mu):
             idxs = np.where(mu)[0]
             stats["full"] += int(idxs.size)
             for i in idxs:
                 lon = float(lon_chunk[i]); lat = float(lat_chunk[i])
-                t_d0 = time.perf_counter()
+                t0d = time.perf_counter()
                 d_km, a, b = _BS._nearest_segment_vectorized(lon, lat)
-                t_d1 = time.perf_counter()
-                stats["dist_s"] += (t_d1 - t_d0)
+                stats["dist_s"] += (time.perf_counter() - t0d)
 
                 dist[i] = d_km
                 c1_id = _BS._country_id_at_lonlat(lon, lat)
@@ -553,7 +533,7 @@ def _label_and_write_chunk(args):
                     c1[i] = int(c1_id)
                     c2[i] = b if c1[i] == a else a
 
-        # ---------- write ----------
+        # Write shard
         t_w0 = time.perf_counter()
         df = pd.DataFrame({
             "lon": lon_chunk.astype(np.float32),
@@ -569,19 +549,12 @@ def _label_and_write_chunk(args):
         })
         table = pa.Table.from_pandas(df, preserve_index=False)
         pq.write_table(table, temp_path, compression="zstd")
-        t_w1 = time.perf_counter()
-        stats["write_s"] += (t_w1 - t_w0)
+        stats["write_s"] += (time.perf_counter() - t_w0)
 
-        # ---------- done ----------
         elapsed = time.perf_counter() - t0
         print(f"Chunk {chunk_idx} of size {N} finished by process {_PID} aka {_PROCNAME}: {elapsed:.3f}s")
-        return ("ok", {
-            "path": temp_path,
-            "pid": _PID, "proc": _PROCNAME,
-            "elapsed": elapsed, "rows": int(N),
-            "stats": stats
-        })
-
+        return ("ok", {"path": temp_path, "pid": _PID, "proc": _PROCNAME,
+                       "elapsed": elapsed, "rows": int(N), "stats": stats})
     except Exception as e:
         import traceback
         return ("err", {"error": str(e), "traceback": traceback.format_exc()})
@@ -590,10 +563,7 @@ def _label_and_write_chunk(args):
 
 def _concat_parquet_shards(shard_paths: list[str], out_path: str,
                            compression: str = "zstd", row_group_size: int | None = 512_000):
-    """
-    Concatenate many shards into **one Parquet file** by streaming row-groups.
-    Stable across PyArrow versions, memory-bounded, and fast.
-    """
+    """Concatenate shards into one Parquet by streaming row-groups (stable, memory-bounded)."""
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     first_schema = None
     writer = None
@@ -606,7 +576,7 @@ def _concat_parquet_shards(shard_paths: list[str], out_path: str,
                     first_schema = table.schema
                     writer = pq.ParquetWriter(out_path, first_schema, compression=compression)
                 writer.write_table(table, row_group_size=row_group_size)
-            del pf  # important on Windows — release file handle
+            del pf
     finally:
         if writer is not None:
             writer.close()
@@ -617,9 +587,9 @@ def make_dataset_parallel(
     n_total: int,
     out_path: str = os.path.join(FOLDER_PATH, "dataset_all.parquet"),
     mixture = (0.70, 0.30),          # (near-border, uniform)
-    shards_per_total: int = 24,      # total temp shards to produce (↑ keeps workers busy)
-    max_workers: int | None = None,  # None => CPU-1
-    seed: int | None = 42,           # RNG seed for reproducibility (None => nondeterministic)
+    shards_per_total: int = 24,
+    max_workers: int | None = None,
+    seed: int | None = 42,
     gpkg_path: str = GPKG_PATH,
     countries_layer: str = COUNTRIES_LAYER,
     id_field: str = ID_FIELD,
@@ -627,15 +597,17 @@ def make_dataset_parallel(
     tmp_subdir: str = "tmp_shards",
     writer_compression: str = "zstd",
     writer_row_group_size: int | None = 512_000,
-    points_path: str | None = None,         # if given, load starting points from here
-    export_points_path: str | None = None,  # if given (and points_path is None), save the sampled points here
-    shuffle_points: bool = True,            # set False to keep exact order when exporting/consuming
+    points_path: str | None = None,         # load starting points (apples-to-apples)
+    export_points_path: str | None = None,  # save sampled points (for reuse)
+    shuffle_points: bool = True,            # False -> keep exact order
+    # KNN knobs (propagate to workers)
+    knn_k: int = 128,
+    knn_expand: int = 256,
+    expand_rel: float = 1.05,
 ) -> str:
     """
     Generate n_total samples and write ONE Parquet at `out_path`.
-
-    Returns:
-        The absolute path to the written Parquet file.
+    Returns the absolute path to the written Parquet file.
     """
     if cKDTree is None:
         raise RuntimeError("scipy.spatial.cKDTree is required. `pip install scipy`.")
@@ -645,35 +617,28 @@ def make_dataset_parallel(
     tmp_dir = os.path.join(out_dir, tmp_subdir)
     os.makedirs(tmp_dir, exist_ok=True)
 
-    # RNG: fixed seed => same dataset every time; None => new randomness
     rng = np.random.default_rng(seed)
 
-    # 1) Draw points (parent process, fast)
-    # Obtain starting points (either load or generate)
+    # 1) Draw or load points (parent process only; no labeling here)
     if points_path is not None:
-        # --- apples-to-apples path: load pre-generated points and skip any RNG usage here ---
         t0 = time.perf_counter()
         (lon, lat, xyz, is_border, r_band, dkm_hint, ida, idb) = _load_points_parquet(points_path)
-        dt = time.perf_counter() - t0
-        print(f"Loaded starting points from '{points_path}' in {dt:.3f}s")
-        # honor user choice about shuffling (default True to mix shards; False for strictly identical order)
+        print(f"Loaded starting points from '{points_path}' in {time.perf_counter() - t0:.3f}s")
         if shuffle_points:
             rng = np.random.default_rng(seed)
             perm = rng.permutation(len(lon))
             lon, lat, xyz, is_border, r_band, dkm_hint, ida, idb = \
                 lon[perm], lat[perm], xyz[perm], is_border[perm], r_band[perm], dkm_hint[perm], ida[perm], idb[perm]
     else:
-        # --- normal path: generate points here, optionally export for reuse by other labelers ---
-        # Sampler used **only** to draw near-border points in the parent (no labeling here)
         t0 = time.perf_counter()
         sampler_for_drawing = BorderSampler(
             gpkg_path=gpkg_path,
             countries_layer=countries_layer,
             id_field=id_field,
             borders_fgb=borders_fgb,
+            knn_k=knn_k, knn_expand=knn_expand, expand_rel=expand_rel,
         )
-        dt = time.perf_counter() - t0
-        print(f"Sampler creation: {dt:.3f}s")
+        print(f"Sampler creation: {time.perf_counter() - t0:.3f}s")
         t0 = time.perf_counter()
 
         n_border = int(mixture[0] * n_total)
@@ -705,14 +670,11 @@ def make_dataset_parallel(
             lon, lat, xyz, is_border, r_band, dkm_hint, ida, idb = \
                 lon[perm], lat[perm], xyz[perm], is_border[perm], r_band[perm], dkm_hint[perm], ida[perm], idb[perm]
 
-
         if export_points_path:
             ep = _save_points_parquet(export_points_path, lon, lat, xyz, is_border, r_band, dkm_hint, ida, idb)
             print(f"Exported starting points to '{ep}'")
 
-
-    dt = time.perf_counter() - t0
-    print(f"Parent Processes: {dt:.3f}s")
+    print(f"Parent Processes: {time.perf_counter() - t0:.3f}s")
     t0 = time.perf_counter()
     
     # 2) Parallel labeling into many temp shards
@@ -727,12 +689,12 @@ def make_dataset_parallel(
             max_workers = 4
 
     futures, temp_paths = [], []
-    agg = defaultdict(float)   # holds sums
+    agg = defaultdict(float)
     with ProcessPoolExecutor(
         max_workers=max_workers,
         mp_context=mp.get_context("spawn"),
         initializer=_init_worker,
-        initargs=(gpkg_path, countries_layer, id_field, borders_fgb),
+        initargs=(gpkg_path, countries_layer, id_field, borders_fgb, knn_k, knn_expand, expand_rel),
     ) as ex:
         for ci in range(shards):
             lo = ci * chunk_size
@@ -745,7 +707,7 @@ def make_dataset_parallel(
                 lon[lo:hi], lat[lo:hi], xyz[lo:hi],
                 is_border[lo:hi], r_band[lo:hi],
                 dkm_hint[lo:hi], ida[lo:hi], idb[lo:hi],
-                tmp_path, ci
+                tmp_path, ci, knn_k, knn_expand, expand_rel
             )
             futures.append(ex.submit(_label_and_write_chunk, args))
 
@@ -756,35 +718,30 @@ def make_dataset_parallel(
             if status == "err":
                 raise RuntimeError(f"Worker failed: {payload['error']}\n{payload['traceback']}")
             info = payload
-            temp_paths.append(info["path"]) 
+            temp_paths.append(info["path"])
 
-            # aggregate stats
             s = info.get("stats", {})
-            agg["points"]        += s.get("points", 0)
-            agg["fast"]          += s.get("fast", 0)
-            agg["full"]          += s.get("full", 0)
-            agg["poly_query_s"]  += s.get("poly_query_s", 0.0)
-            agg["dist_s"]        += s.get("dist_s", 0.0)
-            agg["write_s"]       += s.get("write_s", 0.0)
+            agg["points"]       += s.get("points", 0)
+            agg["fast"]         += s.get("fast", 0)
+            agg["full"]         += s.get("full", 0)
+            agg["poly_query_s"] += s.get("poly_query_s", 0.0)
+            agg["dist_s"]       += s.get("dist_s", 0.0)
+            agg["write_s"]      += s.get("write_s", 0.0)
 
-    # after the loop, emit a compact summary
-    points = int(agg["points"])
-    fast = int(agg["fast"])
-    full = int(agg["full"])
     print(
         "[aggregate] "
-        f"points={points} fast={fast} full={full}  "
+        f"points={int(agg['points'])} fast={int(agg['fast'])} full={int(agg['full'])}  "
         f"t_poly={agg['poly_query_s']:.1f}s t_dist={agg['dist_s']:.1f}s t_write={agg['write_s']:.1f}s"
     )
 
-    dt = time.perf_counter() - t0
-    print(f"Parallel labeling: {dt:.3f}s")
+    print(f"Parallel labeling: {time.perf_counter() - t0:.3f}s")
     t0 = time.perf_counter()
+
     # 3) Concatenate shards -> ONE Parquet
     _concat_parquet_shards(temp_paths, out_path, compression=writer_compression,
                            row_group_size=writer_row_group_size)
 
-    # 4) Cleanup temporary files
+    # 4) Cleanup
     for p in temp_paths:
         try: os.remove(p)
         except Exception: pass
@@ -793,25 +750,69 @@ def make_dataset_parallel(
     except Exception:
         pass
     
-    dt = time.perf_counter() - t0
-    print(f"Concatenation and Clean up: {dt:.3f}s")
-
+    print(f"Concatenation and Clean up: {time.perf_counter() - t0:.3f}s")
     return os.path.abspath(out_path)
 
-# --------------------------- script example -------------------------
+def query_point(
+    lon: float,
+    lat: float,
+    gpkg_path: str = GPKG_PATH,
+    countries_layer: str = COUNTRIES_LAYER,
+    id_field: str = ID_FIELD,
+    borders_fgb: str = BORDERS_FGB,
+):
+    """
+    Print the labeling result for a single (lon, lat).
+    Usage (CLI): python clean_geodata.py --lon -56.32122 --lat 47.07616
+    """
+    bs = BorderSampler(
+        gpkg_path=gpkg_path,
+        countries_layer=countries_layer,
+        id_field=id_field,
+        borders_fgb=borders_fgb,
+    )
+    d_km, c1, c2 = bs.sample_lonlat(float(lon), float(lat))
+    print(f"== lon: {float(lon):.6f}, lat: {float(lat):.6f}, dist_km: {d_km:.6f}, c1: {c1}, c2: {c2} ==")
 
-if __name__ == "__main__":
+# --------------------------- execution -------------------------
+
+def run():
     # safety for multiprocessing
     mp.set_start_method("spawn", force=True)
 
     t0 = time.perf_counter()
     path = make_dataset_parallel(
-        n_total=32_000,
-        out_path=os.path.join(FOLDER_PATH, "dataset_all.parquet"),
+        n_total=1_000_000,
+        out_path=os.path.join(FOLDER_PATH, "parquet/dataset_all.parquet"),
         mixture=(0.70, 0.30),
         shards_per_total=32,
-        max_workers=None,   
-        seed=37,           
+        max_workers=None,
+        seed=37,
+        knn_k=128,
+        knn_expand=256,
+        expand_rel=1.05,
     )
     dt = time.perf_counter() - t0
     print(f"Total time Elapsed: {dt:.3f}s")
+    
+    
+START_POINTS = os.path.join(FOLDER_PATH, "parquet/start_points_10k.parquet")
+def run_det():
+    # safety for multiprocessing
+    mp.set_start_method("spawn", force=True)
+
+    t0 = time.perf_counter()
+    path = make_dataset_parallel(
+        n_total=10_000,
+        out_path=os.path.join(FOLDER_PATH, "parquet/sampler_again.parquet"),
+        points_path=START_POINTS,   
+        shards_per_total=32,
+        max_workers=None,
+        shuffle_points=False,  
+    )
+    dt = time.perf_counter() - t0
+    print(f"Total time Elapsed: {dt:.3f}s")
+
+if __name__ == "__main__":
+    run()
+    #query_point(-56.32122, 47.07616)  # Newfoundland, Canada
