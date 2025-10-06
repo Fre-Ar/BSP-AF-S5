@@ -235,7 +235,8 @@ def plot_geopandas(
 plot_geopandas("python/geodata/parquet/dataset_all.parquet",
                sample=None,
                color_by="c1_id",
-               color_mode="hashed")#log_scale=True)  # or 'hashed' or 'continuous'
+               color_mode="hashed")
+               #log_scale=True) 
 
 # usage
 #plot_parquet_points("python/geodata/parquet/dataset_all.parquet", color_by=None)  # or color_by='dist_km' etc.

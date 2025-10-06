@@ -803,16 +803,16 @@ def run_det():
 
     t0 = time.perf_counter()
     path = make_dataset_parallel(
-        n_total=10_000,
-        out_path=os.path.join(FOLDER_PATH, "parquet/sampler_again.parquet"),
-        points_path=START_POINTS,   
+        n_total=10_000_000,
+        out_path=os.path.join(FOLDER_PATH, "parquet/sampler_10M.parquet"),
+        mixture=(0.70, 0.30),
         shards_per_total=32,
         max_workers=None,
-        shuffle_points=False,  
+        seed=37, 
     )
     dt = time.perf_counter() - t0
     print(f"Total time Elapsed: {dt:.3f}s")
 
 if __name__ == "__main__":
     run()
-    #query_point(-56.32122, 47.07616)  # Newfoundland, Canada
+    #query_point(6.225000, 50.555400)  # Vennbahn, Germany/Belgium
