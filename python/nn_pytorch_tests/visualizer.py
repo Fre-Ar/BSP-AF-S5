@@ -1,7 +1,7 @@
 import pandas as pd, geopandas as gpd, numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import colormaps as cmaps
-from matplotlib.colors import hsv_to_rgb
+from matplotlib.colors import hsv_to_rgb, to_rgba
 
 
 def plot_parquet_points(parquet_path, lon_col='lon', lat_col='lat',
@@ -62,30 +62,54 @@ def _is_integer_series(s: pd.Series) -> bool:
         pd.api.types.is_float_dtype(s) and np.all(np.isfinite(s)) and np.allclose(s, np.round(s))
     )
 
-def _hash_colors(ids, sat=0.85, val=0.95):
+def _hash_colors(ids, sat=0.85, val=0.95, overrides=None):
     """
-    Deterministic per-ID RGBA colors using a splitmix64-like bit mixer.
-    Works with NumPy 2.0+ (no copy=False). Accepts any array-like of ints.
+    Deterministic per-ID RGBA colors using a splitmix64-like bit mixer,
+    with optional explicit overrides for specific IDs.
+
+    Args:
+      ids: array-like of ints
+      sat, val: HSV S/V for hashed colors
+      overrides: Optional[dict[int, color]]
+         - color can be any Matplotlib color (e.g., "red", "#aabbcc", (r,g,b), (r,g,b,a))
+
+    Returns:
+      rgba: np.ndarray of shape (N, 4), dtype=float in [0,1]
     """
-    # normalize to a contiguous int64 array, then reinterpret bits as uint64
+    overrides = overrides or {}
+
+    # Normalize to contiguous int64
     i64 = np.asarray(ids, dtype=np.int64)
     u = i64.view(np.uint64)
 
-    # splitmix64-ish mixer (uniform-ish hues)
+    # splitmix64-ish mixer → uniform-ish hue in [0,1)
     x = u + np.uint64(0x9E3779B97F4A7C15)
     x ^= (x >> np.uint64(30)); x *= np.uint64(0xBF58476D1CE4E5B9)
     x ^= (x >> np.uint64(27)); x *= np.uint64(0x94D049BB133111EB)
     x ^= (x >> np.uint64(31))
-
     # hue in [0,1)
     h = (x / np.float64(2**64)).astype(np.float64)
 
+    # Base HSV → RGB, then add alpha=1
     hsv = np.stack(
         [h, np.full_like(h, sat, dtype=float), np.full_like(h, val, dtype=float)],
         axis=1
     )
     rgb = hsv_to_rgb(hsv)  # (N,3)
     rgba = np.concatenate([rgb, np.ones((rgb.shape[0], 1), dtype=float)], axis=1)
+
+    # Apply overrides (vectorized index assign per ID)
+    if overrides:
+        # Build a map with int keys to RGBA floats
+        # (accepts strings/tuples; uses matplotlib.colors.to_rgba)
+        o_rgba = {int(k): np.array(to_rgba(v), dtype=float) for k, v in overrides.items()}
+
+        # For each override ID, set its rows to the explicit color
+        for k, col in o_rgba.items():
+            mask = (i64 == k)
+            if np.any(mask):
+                rgba[mask] = col  # broadcast to all occurrences
+
     return rgba
 
 def _categorical_palette(unique_vals, sat=0.80, val=0.95):
@@ -116,6 +140,7 @@ def plot_geopandas(
     basemap_facecolor='whitesmoke',
     basemap_edgecolor='gray',
     basemap_linewidth=0.3,
+    overrides=None
 ):
     df = _prep_dataframe(parquet_path, lon, lat, color_by, sample)
     gdf = gpd.GeoDataFrame(
@@ -178,7 +203,7 @@ def plot_geopandas(
     # --- hashed ---
     elif mode == "hashed":
         ids = pd.to_numeric(series, errors="coerce").fillna(-1).astype("int64").to_numpy()
-        colors = _hash_colors(ids)          # (N,4)
+        colors = _hash_colors(ids, overrides=overrides)          # (N,4)
         colors = colors.copy(); colors[:, 3] = alpha  # set alpha into the color array
 
         # sanity debug
@@ -233,10 +258,24 @@ def plot_geopandas(
 # usage
 #plot_parquet_points("python/geodata/parquet/dataset_all.parquet", color_by=None)  # or color_by='dist_km' etc.
 
-def show_plot():
+overrides={          
+    180: "#000000"         # country 840 in a specific blue
+}
+
+def show_c_plot():
     plot_geopandas("python/geodata/parquet/dataset_all.parquet",
                    sample=None,
                    color_by="c1_id",
-                   color_mode="hashed")
+                   color_mode="hashed",
+                   overrides=overrides)
                    #log_scale=True) 
-show_plot()
+                   
+def show_dist_plot():
+    plot_geopandas("python/geodata/parquet/dataset_all.parquet",
+                   sample=None,
+                   color_by="dist_km",
+                   color_mode="continuous",
+                   overrides=overrides,
+                   log_scale=True) 
+#show_c_plot()
+show_dist_plot()

@@ -1,6 +1,6 @@
 import json, math, numpy as np, pandas as pd, torch
 from torch.utils.data import DataLoader
-from visualizer import plot_geopandas
+from visualizer import plot_geopandas, overrides as new_hash
 from siren import SIRENLayer, SIREN
 from nir import NIRLayer, NIRTrunk, MultiHeadNIR
 from data import BordersParquet, LossWeights, train_one_epoch, evaluate, load_ecoc_codes
@@ -68,7 +68,8 @@ def compare_parquet_and_model_ecoc(
     n_bits: int | None = None,     # if None, inferred from codebook
     model_outputs_km: bool = True,
     earth_radius_km: float = 6371.0,
-    predictions_only: bool = False # <-- NEW: just show model predictions
+    predictions_only: bool = False, # <-- just show model predictions
+    overrides=None
 ):
     # device
     if device is None:
@@ -163,7 +164,7 @@ def compare_parquet_and_model_ecoc(
                        color_mode="continuous",
                        log_scale=True,
                        clip_quantiles=(0.01,0.99),
-                       sample=None, markersize=2, alpha=0.9, figsize=(11,5))
+                       sample=None, markersize=2, alpha=0.9, figsize=(11,5), overrides=overrides)
 
         # (B) predicted c1 (hashed colors)
         tmp_c1 = df[["lon","lat"]].copy()
@@ -173,7 +174,7 @@ def compare_parquet_and_model_ecoc(
                        lon="lon", lat="lat",
                        color_by="pred_c1",
                        color_mode="hashed",
-                       sample=None, markersize=3, alpha=0.9, figsize=(11,5))
+                       sample=None, markersize=3, alpha=0.9, figsize=(11,5), overrides=overrides)
 
         # (C) predicted c2 (hashed colors)
         tmp_c2 = df[["lon","lat"]].copy()
@@ -183,7 +184,7 @@ def compare_parquet_and_model_ecoc(
                        lon="lon", lat="lat",
                        color_by="pred_c2",
                        color_mode="hashed",
-                       sample=None, markersize=3, alpha=0.9, figsize=(11,5))
+                       sample=None, markersize=3, alpha=0.9, figsize=(11,5), overrides=overrides)
 
         return {
             "pred_dist": pred_dist,
@@ -204,7 +205,7 @@ def compare_parquet_and_model_ecoc(
                    lon="lon", lat="lat",
                    color_by="err_km", color_mode="continuous",
                    log_scale=True, clip_quantiles=(0.01,0.99),
-                   sample=None, markersize=2, alpha=0.9, figsize=(11,5))
+                   sample=None, markersize=2, alpha=0.9, figsize=(11,5), overrides=overrides)
 
     # (B) c1 correctness (green/red)
     _plot_green_red(df["lon"].to_numpy(), df["lat"].to_numpy(),
@@ -240,6 +241,8 @@ def build_model_for_eval():
         code_bits=32
     )
 
+
+
 compare_parquet_and_model_ecoc(
     parquet_path="python/geodata/parquet/dataset_all.parquet",
     checkpoint_path="python/nn_checkpoints/siren_best.pt",
@@ -248,4 +251,5 @@ compare_parquet_and_model_ecoc(
     sample=1_000_000,
     model_outputs_km=True
     #,predictions_only=True
+    ,overrides=new_hash
 )
