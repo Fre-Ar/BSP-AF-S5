@@ -1,81 +1,142 @@
 import math, json, pathlib, random
+from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
 import torch
-import torch.nn as nn
+import torch.nn as nn, torch.optim as opt
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-import pandas as pd
+from torch.utils.data import Dataset, DataLoader
+import pandas as pd, numpy as np
 from tqdm import tqdm
-from siren import MultiHeadSIREN
+import json
+
+# ===================== ECOC =====================
+
+BIT_LENGTH = 32
+
+def code_to_bits_np(code: int) -> np.ndarray:
+    return np.array([(code >> b) & 1 for b in range(BIT_LENGTH)], dtype=np.uint8)
+
+def load_ecoc_codes(path: str) -> dict[int, np.ndarray]:
+    """Load id->32-bit code from JSON, converting keys to int."""
+    with open(path, "r") as f:
+        raw = json.load(f)
+    return {int(k): code_to_bits_np(int(v)) for k, v in raw.items()}
+
+
+
 
 # ===================== DATA =====================
 
-@dataclass
-class LabelMaps:
-    c1_to_idx: dict
-    c2_to_idx: dict
-    idx_to_c1: list
-    idx_to_c2: list
 
 class BordersParquet(Dataset):
     """
-    Loads a Parquet table with columns:
-      lon, lat, x, y, z, dist_km, c1_id, c2_id, is_border, r_band
-    Builds contiguous label ids for c1_id and c2_id.
-    """
-    def __init__(self, parquet_path, split="train", split_frac=(0.95, 0.05),
-                 cache_dir=None, seed=1337, use_columns=None):
-        super().__init__()
-        self.path = str(parquet_path)
-        self.use_columns = use_columns or ["x","y","z","dist_km","c1_id","c2_id","is_border","r_band"]
+    Parquet-backed dataset for multi-head ECOC training.
 
-        # Load once (pandas uses pyarrow backend, memory-maps when possible)
+    Expects columns:
+      lon, lat, x, y, z, dist_km, c1_id, c2_id, is_border, r_band
+
+    ECOC targets:
+      You must pass a codebook that maps class ID -> 32-bit array (0/1).
+        codebook: Dict[int, np.ndarray (32,)]
+
+    Splitting:
+      - Deterministic shuffle with `seed`, then first chunk is 'train', tail is 'val'.
+      - `split_frac=(train_frac, val_frac)` must sum to 1.
+
+    Returns per item:
+      {
+        "xyz":      FloatTensor (3,),
+        "dist":     FloatTensor (1,),            # in km
+        "c1_bits":  FloatTensor (32,),           # {0.,1.}
+        "c2_bits":  FloatTensor (32,),           # {0.,1.}
+      }
+    """
+    def __init__(self,
+                 parquet_path: str | pathlib.Path,
+                 codebook: Dict[int, np.ndarray],
+                 split: str = "train",
+                 split_frac: Tuple[float, float] = (0.95, 0.05),
+                 seed: int = 1337,
+                 use_columns: Optional[list] = None,
+                 cache_dir: Optional[str | pathlib.Path] = None):
+        super().__init__()
+        assert abs(sum(split_frac) - 1.0) < 1e-6, "split_frac must sum to 1"
+        assert split in ("train", "val")
+
+        self.path = str(parquet_path)
+        self.use_columns = use_columns or [
+            "x","y","z","dist_km","c1_id","c2_id","is_border","r_band"
+        ]
+
+        # --- load dataframe (pyarrow backend can memory-map) ---
         df = pd.read_parquet(self.path, columns=self.use_columns)
 
-        # Shuffle + split
+        # --- deterministic shuffle & split ---
         rng = random.Random(seed)
         idx = list(range(len(df)))
         rng.shuffle(idx)
         n = len(idx)
         n_train = int(n * split_frac[0])
-        ids = idx[:n_train] if split=="train" else idx[n_train:]
-        self.df = df.iloc[ids].reset_index(drop=True)
+        take = idx[:n_train] if split == "train" else idx[n_train:]
+        self.df = df.iloc[take].reset_index(drop=True)
 
-        # Build contiguous maps (persistable)
-        c1_vals = pd.Index(df["c1_id"].unique()).sort_values()
-        c2_vals = pd.Index(df["c2_id"].unique()).sort_values()
-        self.c1_to_idx = {int(v): i for i,v in enumerate(c1_vals)}
-        self.c2_to_idx = {int(v): i for i,v in enumerate(c2_vals)}
-        self.idx_to_c1 = [int(v) for v in c1_vals]
-        self.idx_to_c2 = [int(v) for v in c2_vals]
+        # --- sanity: all IDs present in codebooks ---
+        all_ids_needed = set(pd.unique(pd.concat([df["c1_id"], df["c2_id"]], ignore_index=True)).tolist())
+        # set difference
+        missing = all_ids_needed - set(codebook.keys())
+        if missing:
+            raise ValueError(
+                f"Codebook is missing {len(missing)} id(s) present in the dataset, "
+                f"e.g. {sorted(list(missing))[:5]}"   
+            )
 
-        # Precompute tensors (speeds up training)
-        self.xyz = torch.from_numpy(self.df[["x","y","z"]].values).float()
-        self.dist = torch.from_numpy(self.df["dist_km"].values).float().unsqueeze(1)
-        self.c1 = torch.tensor([self.c1_to_idx[int(v)] for v in self.df["c1_id"].values], dtype=torch.long)
-        self.c2 = torch.tensor([self.c2_to_idx[int(v)] for v in self.df["c2_id"].values], dtype=torch.long)
+        # --- store codebook (keep as python dict) ---
+        self.codebook = codebook
 
-        # Optional save of label maps
+        # --- precompute tensors (fast __getitem__) ---
+        # coordinates and regression target
+        self.xyz = torch.from_numpy(self.df[["x","y","z"]].values).float()           # (N,3)
+        self.dist = torch.from_numpy(self.df["dist_km"].values).float().unsqueeze(1) # (N,1)
+
+
+        # ECOC bits (float32 in {0.,1.})
+        def _stack_bits(ids, codebook):
+            bits = [codebook[int(v)] for v in ids]
+            arr = np.stack(bits, 0).astype(np.float32)  # (N,32)
+            if arr.shape[1] != BIT_LENGTH:
+                raise ValueError(f"Expected {BIT_LENGTH}-bit codes, got shape {arr.shape}")
+            return torch.from_numpy(arr)
+
+        self.c1_bits = _stack_bits(self.df["c1_id"].values, self.codebook)  # (N,32)
+        self.c2_bits = _stack_bits(self.df["c2_id"].values, self.codebook)  # (N,32)
+
+        # --- optional: persist a small manifest for reproducibility ---
         if cache_dir:
-            cache_dir = pathlib.Path(cache_dir); cache_dir.mkdir(parents=True, exist_ok=True)
-            with open(cache_dir/"label_maps.json","w") as f:
-                json.dump({
-                    "c1_to_idx": self.c1_to_idx,
-                    "c2_to_idx": self.c2_to_idx,
-                    "idx_to_c1": self.idx_to_c1,
-                    "idx_to_c2": self.idx_to_c2
-                }, f)
+            cache = pathlib.Path(cache_dir)
+            cache.mkdir(parents=True, exist_ok=True)
+            manifest = {
+                "num_rows": len(self.df),
+                "path": self.path,
+                "columns": self.use_columns,
+                "split": split,
+                "split_frac": split_frac,
+                "seed": seed,
+                "ids_seen": sorted([int(v) for v in all_ids_needed]),
+            }
+            with open(cache/"dataset_manifest.json", "w") as f:
+                json.dump(manifest, f, indent=2)
 
-    def __len__(self): return len(self.df)
+    def __len__(self) -> int:
+        return len(self.df)
 
-    def __getitem__(self, i):
+    def __getitem__(self, i: int) -> dict:
         return {
-            "xyz": self.xyz[i],
-            "dist": self.dist[i],
-            "c1": self.c1[i],
-            "c2": self.c2[i]
+            "xyz":       self.xyz[i],        # (3,)
+            "dist":      self.dist[i],       # (1,)
+            "c1_bits":   self.c1_bits[i],    # (32,)
+            "c2_bits":   self.c2_bits[i],    # (32,)
         }
-        
+
 # ===================== TRAINING =====================
 
 @dataclass
@@ -84,143 +145,177 @@ class LossWeights:
     w_c1: float = 1.0
     w_c2: float = 1.0
 
-def train_one_epoch(model, loader, opt, device, lw: LossWeights,
-                    grad_clip=1.0, max_dist_km=None):
+def train_one_epoch(model: nn.Module,
+                    loader: DataLoader,
+                    optimizer: torch.optim.Optimizer,
+                    device: torch.device | str,
+                    lw: LossWeights,
+                    grad_clip: Optional[float] = 1.0,
+                    max_dist_km: Optional[float] = None,
+                    pos_weight_c1: Optional[torch.Tensor] = None,
+                    pos_weight_c2: Optional[torch.Tensor] = None
+                    ) -> dict:
+    """
+    Trains for one epoch on batches containing:
+      xyz -> model -> (pred_dist, c1_logits, c2_logits)
+      dist (km), c1_bits (32), c2_bits (32)
+
+    Loss:
+      loss = w_dist * MSE(pred_dist, dist) +
+             w_c1   * BCEWithLogits(c1_logits, c1_bits) +
+             w_c2   * BCEWithLogits(c2_logits, c2_bits)
+
+    Metrics returned:
+      - rmse_km
+      - c1_bit_acc, c2_bit_acc  (fraction of bits correct at 0.5 threshold)
+      - loss
+    """
     model.train()
-    ce = nn.CrossEntropyLoss()
-    running = {"loss":0.0,"mse":0.0,"c1_acc":0.0,"c2_acc":0.0,"n":0}
+    
+    if pos_weight_c1 is not None:
+        pos_weight_c1 = pos_weight_c1.to(device)  # shape (32,)
+    if pos_weight_c2 is not None:
+        pos_weight_c2 = pos_weight_c2.to(device)
 
-    for batch in tqdm(loader, leave=False):
-        xyz = batch["xyz"].to(device)
-        dist = batch["dist"].to(device)
-        c1 = batch["c1"].to(device)
-        c2 = batch["c2"].to(device)
+    bce_c1 = nn.BCEWithLogitsLoss(pos_weight=pos_weight_c1)
+    bce_c2 = nn.BCEWithLogitsLoss(pos_weight=pos_weight_c2)
 
-        pred_dist, c1_logits, c2_logits = model(xyz)
+    running = {"loss": 0.0, "mse_sum": 0.0, "bits1": 0.0, "bits2": 0.0, "n": 0, "bitsN": 0}
 
-        # Optionally clamp target distances (for outlier robustness)
+    pbar = tqdm(loader, leave=False)
+    for batch in pbar:
+        xyz       = batch["xyz"].to(device)           # (B,3)
+        dist      = batch["dist"].to(device)          # (B,1)
+        c1_bits   = batch["c1_bits"].to(device)       # (B,32)
+        c2_bits   = batch["c2_bits"].to(device)       # (B,32)
+
         if max_dist_km is not None:
             dist = dist.clamp_max(max_dist_km)
+
+        optimizer.zero_grad(set_to_none=True)
+
+
+        pred_dist, c1_logits, c2_logits = model(xyz)  # (B,1), (B,32), (B,32)
 
         mse = F.mse_loss(pred_dist, dist)
         loss = lw.w_dist * mse
-
         if lw.w_c1 > 0:
-            loss += lw.w_c1 * ce(c1_logits, c1)
+            loss += lw.w_c1 * bce_c1(c1_logits, c1_bits)
         if lw.w_c2 > 0:
-            loss += lw.w_c2 * ce(c2_logits, c2)
+            loss += lw.w_c2 * bce_c2(c2_logits, c2_bits)
 
-        opt.zero_grad(set_to_none=True)
         loss.backward()
-        if grad_clip: nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        opt.step()
+        if grad_clip is not None and grad_clip > 0:
+            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        optimizer.step()
 
         with torch.no_grad():
-            running["loss"] += loss.item() * xyz.size(0)
-            running["mse"]  += mse.item() * xyz.size(0)
-            running["c1_acc"] += (c1_logits.argmax(1)==c1).float().sum().item()
-            running["c2_acc"] += (c2_logits.argmax(1)==c2).float().sum().item()
-            running["n"] += xyz.size(0)
+            B = xyz.size(0)
+            running["loss"]   += loss.item() * B
+            running["mse_sum"]+= F.mse_loss(pred_dist, dist, reduction="sum").item()
+            # bit accuracies
+            c1_pred_bits = (torch.sigmoid(c1_logits) >= 0.5).float()
+            c2_pred_bits = (torch.sigmoid(c2_logits) >= 0.5).float()
+            running["bits1"] += (c1_pred_bits.eq(c1_bits)).float().sum().item()
+            running["bits2"] += (c2_pred_bits.eq(c2_bits)).float().sum().item()
+            running["bitsN"] += 2 * B * c1_bits.size(1)  # total number of compared bits across both heads
+            running["n"]     += B
+
+            pbar.set_postfix({
+                "rmse(km)": (running["mse_sum"]/running["n"])**0.5,
+                "b1": running["bits1"] / max(1, running["bitsN"]/2),
+                "b2": running["bits2"] / max(1, running["bitsN"]/2),
+            })
 
     n = max(1, running["n"])
+    bit_den = max(1, running["bitsN"]//2)  # per-head denominator (B*32 summed across batches)
     return {
-        "loss": running["loss"]/n,
-        "rmse_km": math.sqrt(running["mse"]/n),
-        "c1_acc": running["c1_acc"]/n,
-        "c2_acc": running["c2_acc"]/n
+        "loss":     running["loss"] / n,
+        "rmse_km":  (running["mse_sum"] / n) ** 0.5,
+        "c1_bit_acc": running["bits1"] / bit_den,
+        "c2_bit_acc": running["bits2"] / bit_den,
     }
 
 @torch.no_grad()
-def evaluate(model, loader, device, lw: LossWeights, max_dist_km=None):
+def evaluate(model: nn.Module,
+             loader: DataLoader,
+             device: torch.device | str,
+             lw: LossWeights,
+             max_dist_km: Optional[float] = None,
+             pos_weight_c1: Optional[torch.Tensor] = None,
+             pos_weight_c2: Optional[torch.Tensor] = None) -> dict:
+    """
+    Validation loop (no grad). Expects batches with: xyz, dist, c1_bits, c2_bits.
+    Model must return: (pred_dist, c1_logits, c2_logits).
+
+    Returns:
+      {
+        "loss": average total loss over samples,
+        "rmse_km": sqrt(sum(MSE)/N),
+        "c1_bit_acc": fraction of correct bits for c1 head,
+        "c2_bit_acc": fraction of correct bits for c2 head,
+      }
+    """
     model.eval()
-    ce = nn.CrossEntropyLoss(reduction="sum")
-    s = {"loss":0.0,"mse":0.0,"c1_acc":0.0,"c2_acc":0.0,"n":0}
+
+    if pos_weight_c1 is not None:
+        pos_weight_c1 = pos_weight_c1.to(device)
+    if pos_weight_c2 is not None:
+        pos_weight_c2 = pos_weight_c2.to(device)
+
+    # Use sum-reduction to aggregate exactly over the whole epoch
+    bce_c1 = nn.BCEWithLogitsLoss(pos_weight=pos_weight_c1, reduction="sum")
+    bce_c2 = nn.BCEWithLogitsLoss(pos_weight=pos_weight_c2, reduction="sum")
+
+    totals = {
+        "loss_sum": 0.0,
+        "mse_sum":  0.0,
+        "bits1":    0.0,
+        "bits2":    0.0,
+        "bitsN":    0,    # total count of compared bits across both heads
+        "n":        0,    # total samples
+    }
 
     for batch in loader:
-        xyz = batch["xyz"].to(device)
-        dist = batch["dist"].to(device)
-        c1 = batch["c1"].to(device)
-        c2 = batch["c2"].to(device)
+        xyz     = batch["xyz"].to(device)
+        dist    = batch["dist"].to(device)
+        c1_bits = batch["c1_bits"].to(device)
+        c2_bits = batch["c2_bits"].to(device)
 
-        pred_dist, c1_logits, c2_logits = model(xyz)
         if max_dist_km is not None:
             dist = dist.clamp_max(max_dist_km)
 
-        mse = F.mse_loss(pred_dist, dist, reduction="sum")
-        loss = lw.w_dist*mse
-        if lw.w_c1>0: loss += lw.w_c1 * ce(c1_logits, c1)
-        if lw.w_c2>0: loss += lw.w_c2 * ce(c2_logits, c2)
+        pred_dist, c1_logits, c2_logits = model(xyz)
 
-        s["loss"] += loss.item()
-        s["mse"]  += mse.item()
-        s["c1_acc"] += (c1_logits.argmax(1)==c1).float().sum().item()
-        s["c2_acc"] += (c2_logits.argmax(1)==c2).float().sum().item()
-        s["n"] += xyz.size(0)
+        # sum-reduction MSE
+        mse_sum = F.mse_loss(pred_dist, dist, reduction="sum")
+        loss_sum = lw.w_dist * mse_sum
+        if lw.w_c1 > 0:
+            loss_sum = loss_sum + lw.w_c1 * bce_c1(c1_logits, c1_bits)
+        if lw.w_c2 > 0:
+            loss_sum = loss_sum + lw.w_c2 * bce_c2(c2_logits, c2_bits)
 
-    n = max(1, s["n"])
+        # bit accuracies
+        c1_pred = (torch.sigmoid(c1_logits) >= 0.5).float()
+        c2_pred = (torch.sigmoid(c2_logits) >= 0.5).float()
+        bits1 = (c1_pred.eq(c1_bits)).float().sum().item()
+        bits2 = (c2_pred.eq(c2_bits)).float().sum().item()
+
+        B = xyz.size(0)
+        totals["loss_sum"] += loss_sum.item()
+        totals["mse_sum"]  += mse_sum.item()
+        totals["bits1"]    += bits1
+        totals["bits2"]    += bits2
+        totals["bitsN"]    += 2 * B * c1_bits.size(1)
+        totals["n"]        += B
+
+    n = max(1, totals["n"])
+    per_head_bits = max(1, totals["bitsN"] // 2)
+
     return {
-        "loss": s["loss"]/n,
-        "rmse_km": math.sqrt(s["mse"]/n),
-        "c1_acc": s["c1_acc"]/n,
-        "c2_acc": s["c2_acc"]/n
+        "loss":        totals["loss_sum"] / n,
+        "rmse_km":     (totals["mse_sum"] / n) ** 0.5,
+        "c1_bit_acc":  totals["bits1"] / per_head_bits,
+        "c2_bit_acc":  totals["bits2"] / per_head_bits,
     }
 
-# ===================== MAIN =====================
-
-def main(parquet_path, batch_size=8192, epochs=10,
-         hidden=256, depth=5, w0_first=30.0, w0_hidden=1.0,
-         lr=9e-4, loss_weights=(1.0,1.0,1.0),
-         max_dist_km=None, device=None):
-
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Datasets
-    train_ds = BordersParquet(parquet_path, split="train", split_frac=(0.95,0.05))
-    val_ds   = BordersParquet(parquet_path, split="val",   split_frac=(0.95,0.05))
-
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=batch_size*2, shuffle=False, num_workers=0)
-
-    # Model
-    model = MultiHeadSIREN(in_dim=3, hidden=hidden, depth=depth,
-                           w0_first=w0_first, w0_hidden=w0_hidden,
-                           num_c1=len(train_ds.idx_to_c1), num_c2=len(train_ds.idx_to_c2)).to(device)
-
-    # Optim
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
-
-    lw = LossWeights(*loss_weights)
-    print(f"Classes: c1={len(train_ds.idx_to_c1)}, c2={len(train_ds.idx_to_c2)}")
-    print(f"Training on device: {device}")
-
-    best = None
-    for ep in range(1, epochs+1):
-        tr = train_one_epoch(model, train_loader, opt, device, lw, max_dist_km=max_dist_km)
-        va = evaluate(model, val_loader, device, lw, max_dist_km=max_dist_km)
-        line = (f"[{ep:03d}] "
-                f"train rmse={tr['rmse_km']:.3f}km c1={tr['c1_acc']:.3f} c2={tr['c2_acc']:.3f} | "
-                f"val rmse={va['rmse_km']:.3f}km c1={va['c1_acc']:.3f} c2={va['c2_acc']:.3f}")
-        print(line)
-        # Track best by val RMSE + (1-acc) penalties
-        score = va["rmse_km"] + (1.0 - va["c1_acc"]) + (1.0 - va["c2_acc"])
-        if best is None or score < best[0]:
-            best = (score, {k:float(v) for k,v in va.items()})
-            torch.save({"model":model.state_dict(),
-                        "label_maps":{
-                            "idx_to_c1": train_ds.idx_to_c1,
-                            "idx_to_c2": train_ds.idx_to_c2
-                        }}, "siren_multitask_best.pt")
-            print("  ↳ saved checkpoint: siren_multitask_best.pt")
-
-if __name__ == "__main__":
-    PATH = "python/geodata/parquet/dataset_all.parquet"
-    main(PATH,
-         epochs=20,
-         batch_size=8192,
-         hidden=256,
-         depth=5,
-         w0_first=30.0,
-         w0_hidden=1.0,
-         lr=9e-4,
-         loss_weights=(1.0,1.0,1.0),
-         max_dist_km=None)

@@ -19,13 +19,16 @@ class NIRLayer(nn.Module):
 
 class NIRTrunk(nn.Module):
     """Shared trunk used by all heads."""
-    def __init__(self, layer: NIRLayer, in_dim=3, layer_counts: tuple = (256,)*5, params: tuple = (1.0,)):
+    def __init__(self, layer: NIRLayer, in_dim=3, layer_counts: tuple = (256,)*5, params: tuple = ((1.0,),)*5):
         super().__init__()
+        
         depth = len(layer_counts)
         assert depth >= 2
-        layers = [layer(in_dim, layer_counts[0], params=params, ith_layer=0)]
+        assert len(params) == depth
+        
+        layers = [layer(in_dim, layer_counts[0], params=params[0], ith_layer=0)]
         for i in range(1, depth-1):
-            layers += [layer(layer_counts[i-1], layer_counts[i], params=params, ith_layer=i)]
+            layers += [layer(layer_counts[i-1], layer_counts[i], params=params[i], ith_layer=i)]
         self.net = nn.Sequential(*layers)
 
     def forward(self, x): 
@@ -42,12 +45,12 @@ class MultiHeadNIR(nn.Module):
                  in_dim=3,
                  layer_counts: tuple = (256,)*5,
                  params: tuple = (1.0,),
-                 country_count=289):
+                 code_bits=32):
         super().__init__()
         self.trunk = NIRTrunk(layer, in_dim, layer_counts, params=params)
         self.dist_head = nn.Linear(layer_counts[-1], 1)
-        self.c1_head   = nn.Linear(layer_counts[-1], country_count)
-        self.c2_head   = nn.Linear(layer_counts[-1], country_count)
+        self.c1_head   = nn.Linear(layer_counts[-1], code_bits)
+        self.c2_head   = nn.Linear(layer_counts[-1], code_bits)
         nn.init.xavier_uniform_(self.dist_head.weight)
         nn.init.zeros_(self.dist_head.bias)
         nn.init.xavier_uniform_(self.c1_head.weight)

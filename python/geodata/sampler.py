@@ -782,8 +782,8 @@ def run():
 
     t0 = time.perf_counter()
     path = make_dataset_parallel(
-        n_total=1_000_000,
-        out_path=os.path.join(FOLDER_PATH, "parquet/dataset_all.parquet"),
+        n_total=100_000,
+        out_path=os.path.join(FOLDER_PATH, "parquet/dataset_100k.parquet"),
         mixture=(0.70, 0.30),
         shards_per_total=32,
         max_workers=None,

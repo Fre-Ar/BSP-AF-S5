@@ -230,15 +230,13 @@ def plot_geopandas(
     plt.show()
 
 
-
-# usage
-plot_geopandas("python/geodata/parquet/dataset_all.parquet",
-               sample=None,
-               color_by="c1_id",
-               color_mode="hashed")
-               #log_scale=True) 
-
 # usage
 #plot_parquet_points("python/geodata/parquet/dataset_all.parquet", color_by=None)  # or color_by='dist_km' etc.
 
-
+def show_plot():
+    plot_geopandas("python/geodata/parquet/dataset_all.parquet",
+                   sample=None,
+                   color_by="c1_id",
+                   color_mode="hashed")
+                   #log_scale=True) 
+show_plot()
