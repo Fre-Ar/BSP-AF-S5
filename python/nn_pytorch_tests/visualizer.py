@@ -230,7 +230,7 @@ def plot_geopandas(
         v = np.clip(v, lo, hi)
         if log_scale:
             eps = max(1e-6, 1e-9 * (hi - lo))
-            v = np.log(v + eps)
+            v = np.log10(v + eps)
             lo, hi = np.nanmin(v), np.nanmax(v)
             cb_label = f"log({color_by})"
         else:
@@ -259,23 +259,32 @@ def plot_geopandas(
 #plot_parquet_points("python/geodata/parquet/dataset_all.parquet", color_by=None)  # or color_by='dist_km' etc.
 
 overrides={          
-    180: "#000000"         # country 840 in a specific blue
+    180: "#000000"        
 }
 
-def show_c_plot():
-    plot_geopandas("python/geodata/parquet/dataset_all.parquet",
+PLOT = "python/geodata/parquet/dataset_200k.parquet"
+
+def show_c1_plot():
+    plot_geopandas(PLOT,
                    sample=None,
                    color_by="c1_id",
                    color_mode="hashed",
                    overrides=overrides)
-                   #log_scale=True) 
+                   
+def show_c2_plot():
+    plot_geopandas(PLOT,
+                   sample=None,
+                   color_by="c2_id",
+                   color_mode="hashed",
+                   overrides=overrides)
                    
 def show_dist_plot():
-    plot_geopandas("python/geodata/parquet/dataset_all.parquet",
+    plot_geopandas(PLOT,
                    sample=None,
                    color_by="dist_km",
                    color_mode="continuous",
                    overrides=overrides,
                    log_scale=True) 
-#show_c_plot()
+#show_c1_plot()
+#show_c2_plot()
 show_dist_plot()

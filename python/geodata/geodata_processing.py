@@ -1,7 +1,6 @@
-# pip install geopandas pyogrio shapely
+# python/geodata/geodata_processing.py
 import geopandas as gpd
 import shapely
-from shapely.ops import unary_union
 
 # 1) Load your canonical countries (land + oceans) into a GPKG
 countries = gpd.read_file("python/geodata/world_bank_geodata.gpkg", layer="countries")  # has 'iso','name'
@@ -24,7 +23,7 @@ for i, a in countries.iterrows():
                 borders.append({"left_id": a.id, "right_id": b.id, "geometry": line})
 borders = gpd.GeoDataFrame(borders, geometry="geometry", crs=4326)
 
-# Optional: segmentize long arcs so no segment spans huge distances
+# Segmentize long arcs so no segment spans huge distances
 borders["geometry"] = borders.geometry.segmentize(0.25)  # densify every ~0.25°
 
 # 3) Save runtime layers
