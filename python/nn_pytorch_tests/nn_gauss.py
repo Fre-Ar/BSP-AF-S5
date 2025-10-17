@@ -1,3 +1,5 @@
+# python/nn_pytorch_tests/nn_gauss.py
+
 import torch
 import torch.nn as nn
 from nir import NIRLayer

@@ -1,7 +1,7 @@
 # python/nn_pytorch_tests/data.py
 
 import math, json, pathlib, random
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Literal
 from dataclasses import dataclass
 import torch
 import torch.nn as nn, torch.optim as opt
@@ -19,27 +19,57 @@ def code_to_bits_np(code: int) -> np.ndarray:
     return np.array([(code >> b) & 1 for b in range(BIT_LENGTH)], dtype=np.uint8)
 
 def load_ecoc_codes(path: str) -> dict[int, np.ndarray]:
-    """Load id->32-bit code from JSON, converting keys to int."""
+    """Load ECOC map: class_id (int) -> np.array shape (n_bits,) with {0,1}."""
     with open(path, "r") as f:
         raw = json.load(f)
     return {int(k): code_to_bits_np(int(v)) for k, v in raw.items()}
 
 
+def _hamming_decode(bits_logits: torch.Tensor, codebook: Dict[int, np.ndarray]) -> torch.Tensor:
+    """
+    Argmin Hamming to nearest code.
+    bits_logits: (B, n_bits) pre-sigmoid.
+    Returns LongTensor of predicted class indices with same device.
+    """
+    with torch.no_grad():
+        B, n_bits = bits_logits.shape
+        # Convert codebook to tensor on the same device
+        keys = sorted(codebook.keys())
+        codes = torch.as_tensor(
+            np.stack([codebook[k] for k in keys], axis=0), dtype=torch.float32, device=bits_logits.device
+        )  # (C, n_bits) in {0,1}
+        # turn logits into probabilities in (0,1) then to bits via threshold 0.5
+        probs = torch.sigmoid(bits_logits)
+        preds = (probs > 0.5).float()  # (B, n_bits)
+        # Hamming distance = sum xor; since values are {0,1}, xor == |a-b|
+        # Compute distance to each codebook row
+        # (B, C, n_bits) -> (B, C)
+        dists = (preds.unsqueeze(1) - codes.unsqueeze(0)).abs().sum(dim=-1)
+        best = dists.argmin(dim=1)  # (B,)
+        # Map back to true class IDs (keys)
+        mapped = torch.as_tensor([keys[i] for i in best.tolist()], device=bits_logits.device, dtype=torch.long)
+        return mapped
 
 
 # ===================== DATA =====================
 
+LabelMode = Literal["ecoc", "softmax"]
 
 class BordersParquet(Dataset):
     """
-    Parquet-backed dataset for multi-head ECOC training.
+    Parquet-backed dataset for training the spherical distance + country classification heads.
 
     Expects columns:
       lon, lat, x, y, z, dist_km, c1_id, c2_id, is_border, r_band
-
+    (x,y,z) are the unit vector coords. dist_km is the geodesic distance to nearest border segment.
+    
     ECOC targets:
-      You must pass a codebook that maps class ID -> 32-bit array (0/1).
-        codebook: Dict[int, np.ndarray (32,)]
+      You may pass a codebook that maps class ID -> n_bits array (0/1). If label_mode="ecoc",
+      it will output c1_bits and c2_bits FloatTensors.
+        codebook: Dict[int, np.ndarray (n_bits,)]
+
+    SOFTMAX targets:
+      If label_mode="softmax", the dataset will output integer class indices (c1_idx, c2_idx).
 
     Splitting:
       - Deterministic shuffle with `seed`, then first chunk is 'train', tail is 'val'.
@@ -49,95 +79,93 @@ class BordersParquet(Dataset):
       {
         "xyz":      FloatTensor (3,),
         "dist":     FloatTensor (1,),            # in km
-        "c1_bits":  FloatTensor (32,),           # {0.,1.}
-        "c2_bits":  FloatTensor (32,),           # {0.,1.}
+        "c1_bits":  FloatTensor (n_bits,),       # when label_mode="ecoc"
+        "c2_bits":  FloatTensor (n_bits,),       # when label_mode="ecoc"
+        "c1_idx":   LongTensor (),               # when label_mode="softmax"
+        "c2_idx":   LongTensor (),               # when label_mode="softmax"
       }
     """
     def __init__(self,
                  parquet_path: str | pathlib.Path,
-                 codebook: Dict[int, np.ndarray],
-                 split: str = "train",
-                 split_frac: Tuple[float, float] = (0.95, 0.05),
+                 split: Literal["train", "val"] = "train",
+                 split_frac: Tuple[float, float] = (0.9, 0.1),
                  seed: int = 1337,
-                 use_columns: Optional[list] = None,
-                 cache_dir: Optional[str | pathlib.Path] = None):
+                 codebook:  Optional[Dict[int, np.ndarray]] = None,
+                 label_mode: LabelMode = "ecoc",
+                 drop_cols: Tuple[str, ...] = ("lon", "lat", "is_border", "r_band")):
         super().__init__()
         assert abs(sum(split_frac) - 1.0) < 1e-6, "split_frac must sum to 1"
         assert split in ("train", "val")
 
         self.path = str(parquet_path)
-        self.use_columns = use_columns or [
-            "x","y","z","dist_km","c1_id","c2_id","is_border","r_band"
-        ]
+        self.label_mode = label_mode
+        # --- store codebook (keep as python dict) ---
+        self.codebook = codebook
 
         # --- load dataframe (pyarrow backend can memory-map) ---
-        df = pd.read_parquet(self.path, columns=self.use_columns)
+        df = pd.read_parquet(self.path)
+
+        required = {"x", "y", "z", "dist_km", "c1_id", "c2_id"}
+        missing = required.difference(df.columns)
+        if missing:
+            raise ValueError(f"Parquet is missing required columns: {sorted(missing)}")
 
         # --- deterministic shuffle & split ---
-        rng = random.Random(seed)
-        idx = list(range(len(df)))
+        rng = np.random.default_rng(seed)
+        idx = np.arange(len(df))
         rng.shuffle(idx)
         n = len(idx)
         n_train = int(n * split_frac[0])
         take = idx[:n_train] if split == "train" else idx[n_train:]
         self.df = df.iloc[take].reset_index(drop=True)
 
-        # --- sanity: all IDs present in codebooks ---
-        all_ids_needed = set(pd.unique(pd.concat([df["c1_id"], df["c2_id"]], ignore_index=True)).tolist())
-        # set difference
-        missing = all_ids_needed - set(codebook.keys())
-        if missing:
-            raise ValueError(
-                f"Codebook is missing {len(missing)} id(s) present in the dataset, "
-                f"e.g. {sorted(list(missing))[:5]}"   
-            )
-
-        # --- store codebook (keep as python dict) ---
-        self.codebook = codebook
-
+        # keep raw ids for softmax or ECOC lookup  
+        c1_id = df["c1_id"].to_numpy(np.int32, copy=False)
+        c2_id = df["c2_id"].to_numpy(np.int32, copy=False)
+        
         # --- precompute tensors (fast __getitem__) ---
         # coordinates and regression target
         self.xyz = torch.from_numpy(self.df[["x","y","z"]].values).float()           # (N,3)
         self.dist = torch.from_numpy(self.df["dist_km"].values).float().unsqueeze(1) # (N,1)
 
-
-        # ECOC bits (float32 in {0.,1.})
-        def _stack_bits(ids, codebook):
-            bits = [codebook[int(v)] for v in ids]
-            arr = np.stack(bits, 0).astype(np.float32)  # (N,32)
-            if arr.shape[1] != BIT_LENGTH:
-                raise ValueError(f"Expected {BIT_LENGTH}-bit codes, got shape {arr.shape}")
-            return torch.from_numpy(arr)
-
-        self.c1_bits = _stack_bits(self.df["c1_id"].values, self.codebook)  # (N,32)
-        self.c2_bits = _stack_bits(self.df["c2_id"].values, self.codebook)  # (N,32)
-
-        # --- optional: persist a small manifest for reproducibility ---
-        if cache_dir:
-            cache = pathlib.Path(cache_dir)
-            cache.mkdir(parents=True, exist_ok=True)
-            manifest = {
-                "num_rows": len(self.df),
-                "path": self.path,
-                "columns": self.use_columns,
-                "split": split,
-                "split_frac": split_frac,
-                "seed": seed,
-                "ids_seen": sorted([int(v) for v in all_ids_needed]),
-            }
-            with open(cache/"dataset_manifest.json", "w") as f:
-                json.dump(manifest, f, indent=2)
+        # Pre-compute ECOC tensors if applicable
+        if label_mode == "ecoc":
+            if codebook is None:
+                raise ValueError("label_mode='ecoc' requires a codebook.")
+            c1_bits = np.stack([codebook[int(cid)] for cid in c1_id], axis=0).astype(np.float32)
+            c2_bits = np.stack([codebook[int(cid)] for cid in c2_id], axis=0).astype(np.float32)
+            self.c1_bits = torch.from_numpy(c1_bits)
+            self.c2_bits = torch.from_numpy(c2_bits)
+        else:
+            self.c1_bits = None
+            self.c2_bits = None
+            
+        # Clean memory
+        for c in drop_cols:
+            if c in df:
+                df = df.drop(columns=[c])
+        
+        # Class counts for softmax convenience
+        self.num_classes_c1 = int(c1_id.max()) + 1
+        self.num_classes_c2 = int(c2_id.max()) + 1
+        
+        self.c1_id = torch.as_tensor(c1_id, dtype=torch.long)
+        self.c2_id = torch.as_tensor(c2_id, dtype=torch.long)
 
     def __len__(self) -> int:
-        return len(self.df)
+        return self.xyz.shape[0]
 
     def __getitem__(self, i: int) -> dict:
-        return {
+        item = {
             "xyz":       self.xyz[i],        # (3,)
             "dist":      self.dist[i],       # (1,)
             "c1_bits":   self.c1_bits[i],    # (32,)
             "c2_bits":   self.c2_bits[i],    # (32,)
         }
+        if self.label_mode == "ecoc":
+            item["c1_bits"] = self.c1_bits[i]
+            item["c2_bits"] = self.c2_bits[i]
+        return item
 
 # ===================== TRAINING =====================
 
@@ -152,15 +180,14 @@ def train_one_epoch(model: nn.Module,
                     optimizer: torch.optim.Optimizer,
                     device: torch.device | str,
                     lw: LossWeights,
-                    grad_clip: Optional[float] = 1.0,
-                    max_dist_km: Optional[float] = None,
-                    pos_weight_c1: Optional[torch.Tensor] = None,
-                    pos_weight_c2: Optional[torch.Tensor] = None
+                    label_mode: LabelMode
                     ) -> dict:
     """
     Trains for one epoch on batches containing:
       xyz -> model -> (pred_dist, c1_logits, c2_logits)
       dist (km), c1_bits (32), c2_bits (32)
+      
+    Returns a dict of running averages for logging.
 
     Loss:
       loss = w_dist * MSE(pred_dist, dist) +
@@ -173,83 +200,88 @@ def train_one_epoch(model: nn.Module,
       - loss
     """
     model.train()
+    totals = {
+        "loss": 0.0,
+        "mse_sum": 0.0,
+        "n": 0,
+        "c1_loss": 0.0,
+        "c2_loss": 0.0,
+    }
     
-    if pos_weight_c1 is not None:
-        pos_weight_c1 = pos_weight_c1.to(device)  # shape (32,)
-    if pos_weight_c2 is not None:
-        pos_weight_c2 = pos_weight_c2.to(device)
-
-    bce_c1 = nn.BCEWithLogitsLoss(pos_weight=pos_weight_c1)
-    bce_c2 = nn.BCEWithLogitsLoss(pos_weight=pos_weight_c2)
-
-    running = {"loss": 0.0, "mse_sum": 0.0, "bits1": 0.0, "bits2": 0.0, "n": 0, "bitsN": 0}
+    mse = nn.MSELoss(reduction="mean")
+    bce = nn.BCEWithLogitsLoss(reduction="mean")
+    ce = nn.CrossEntropyLoss(reduction="mean")
 
     pbar = tqdm(loader, leave=False)
     for batch in pbar:
         xyz       = batch["xyz"].to(device)           # (B,3)
         dist      = batch["dist"].to(device)          # (B,1)
-        c1_bits   = batch["c1_bits"].to(device)       # (B,32)
-        c2_bits   = batch["c2_bits"].to(device)       # (B,32)
-
-        if max_dist_km is not None:
-            dist = dist.clamp_max(max_dist_km)
 
         optimizer.zero_grad(set_to_none=True)
 
-
         pred_dist, c1_logits, c2_logits = model(xyz)  # (B,1), (B,32), (B,32)
-
-        mse = F.mse_loss(pred_dist, dist)
-        loss = lw.w_dist * mse
-        if lw.w_c1 > 0:
-            loss += lw.w_c1 * bce_c1(c1_logits, c1_bits)
-        if lw.w_c2 > 0:
-            loss += lw.w_c2 * bce_c2(c2_logits, c2_bits)
-
+        # Distance regression
+        loss_dist = mse(pred_dist, dist)
+        
+        # Classification
+        if label_mode == "ecoc":
+            c1_bits = batch["c1_bits"].to(device)
+            c2_bits = batch["c2_bits"].to(device)
+            loss_c1 = bce(c1_logits, c1_bits)
+            loss_c2 = bce(c2_logits, c2_bits)
+        else:
+            c1_idx = batch["c1_idx"].to(device)
+            c2_idx = batch["c2_idx"].to(device)
+            loss_c1 = ce(c1_logits, c1_idx)
+            loss_c2 = ce(c2_logits, c2_idx)
+        
+        loss = lw.w_dist * loss_dist + lw.w_c1 * loss_c1 + lw.w_c2 * loss_c2
         loss.backward()
-        if grad_clip is not None and grad_clip > 0:
-            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
 
         with torch.no_grad():
-            B = xyz.size(0)
-            running["loss"]   += loss.item() * B
-            running["mse_sum"]+= F.mse_loss(pred_dist, dist, reduction="sum").item()
+            B = xyz.shape(0)
+            totals["loss"] += float(loss.detach()) * B
+            totals["mse_sum"] += F.mse_loss(pred_dist.detach(), dist, reduction="sum").float()
+            totals["c1_loss"] += float(loss_c1.detach()) * B
+            totals["c2_loss"] += float(loss_c2.detach()) * B
+            totals["n"] += B
+            
             # bit accuracies
-            c1_pred_bits = (torch.sigmoid(c1_logits) >= 0.5).float()
-            c2_pred_bits = (torch.sigmoid(c2_logits) >= 0.5).float()
-            running["bits1"] += (c1_pred_bits.eq(c1_bits)).float().sum().item()
-            running["bits2"] += (c2_pred_bits.eq(c2_bits)).float().sum().item()
-            running["bitsN"] += 2 * B * c1_bits.size(1)  # total number of compared bits across both heads
-            running["n"]     += B
+            #c1_pred_bits = (torch.sigmoid(c1_logits) >= 0.5).float()
+            #c2_pred_bits = (torch.sigmoid(c2_logits) >= 0.5).float()
+            #running["bits1"] += (c1_pred_bits.eq(c1_bits)).float().sum().item()
+            #running["bits2"] += (c2_pred_bits.eq(c2_bits)).float().sum().item()
+
 
             pbar.set_postfix({
-                "rmse(km)": (running["mse_sum"]/running["n"])**0.5,
-                "b1": running["bits1"] / max(1, running["bitsN"]/2),
-                "b2": running["bits2"] / max(1, running["bitsN"]/2),
+                "rmse(km)": (totals["mse_sum"]/totals["n"])**0.5,
+                "c1_loss/n": totals["c1_loss"] / max(1, totals["n"]),
+                "c2_loss/n": totals["c2_loss"] / max(1, totals["n"]),
             })
-
-    n = max(1, running["n"])
-    bit_den = max(1, running["bitsN"]//2)  # per-head denominator (B*32 summed across batches)
+    
+    n = max(1, totals["n"])
     return {
-        "loss":     running["loss"] / n,
-        "rmse_km":  (running["mse_sum"] / n) ** 0.5,
-        "c1_bit_acc": running["bits1"] / bit_den,
-        "c2_bit_acc": running["bits2"] / bit_den,
+        "loss":      totals["loss"] / n,
+        "rmse_km":   math.sqrt(totals["mse_sum"] / n),
+        "c1_loss":   totals["c1_loss"] / n,
+        "c2_loss":   totals["c2_loss"] / n,
     }
 
 @torch.no_grad()
 def evaluate(model: nn.Module,
              loader: DataLoader,
              device: torch.device | str,
+             label_mode: LabelMode,
              lw: LossWeights,
-             max_dist_km: Optional[float] = None,
-             pos_weight_c1: Optional[torch.Tensor] = None,
-             pos_weight_c2: Optional[torch.Tensor] = None) -> dict:
+             codebook: Optional[Dict[int, np.ndarray]] = None):
     """
     Validation loop (no grad). Expects batches with: xyz, dist, c1_bits, c2_bits.
     Model must return: (pred_dist, c1_logits, c2_logits).
 
+    For ECOC we report bit-accuracy and (if codebook) decoded accuracy.
+    For softmax we report top-1 accuracy.
+    
     Returns:
       {
         "loss": average total loss over samples,
@@ -259,65 +291,80 @@ def evaluate(model: nn.Module,
       }
     """
     model.eval()
-
-    if pos_weight_c1 is not None:
-        pos_weight_c1 = pos_weight_c1.to(device)
-    if pos_weight_c2 is not None:
-        pos_weight_c2 = pos_weight_c2.to(device)
-
-    # Use sum-reduction to aggregate exactly over the whole epoch
-    bce_c1 = nn.BCEWithLogitsLoss(pos_weight=pos_weight_c1, reduction="sum")
-    bce_c2 = nn.BCEWithLogitsLoss(pos_weight=pos_weight_c2, reduction="sum")
-
     totals = {
-        "loss_sum": 0.0,
-        "mse_sum":  0.0,
-        "bits1":    0.0,
-        "bits2":    0.0,
-        "bitsN":    0,    # total count of compared bits across both heads
-        "n":        0,    # total samples
+        "mse_sum": 0.0,
+        "n": 0,
+        "c1_bits_correct": 0.0,
+        "c2_bits_correct": 0.0,
+        "n_bits_total": 0,
+        "c1_top1": 0.0,
+        "c2_top1": 0.0,
+        "c1_decoded_top1": 0.0,
+        "c2_decoded_top1": 0.0,
     }
 
-    for batch in loader:
-        xyz     = batch["xyz"].to(device)
-        dist    = batch["dist"].to(device)
-        c1_bits = batch["c1_bits"].to(device)
-        c2_bits = batch["c2_bits"].to(device)
+    with torch.no_grad():
+        for batch in loader:
+            xyz     = batch["xyz"].to(device)
+            dist    = batch["dist"].to(device)
 
-        if max_dist_km is not None:
-            dist = dist.clamp_max(max_dist_km)
+            pred_dist, c1_logits, c2_logits = model(xyz)
+            
+            B = xyz.shape[0]
+            # Distance Regression
+            totals["mse_sum"] += lw.w_dist * F.mse_loss(pred_dist, dist, reduction="sum").float()
+            totals["n"] += B
 
-        pred_dist, c1_logits, c2_logits = model(xyz)
+            # Classification
+            if label_mode == "ecoc":
+                c1_bits = batch["c1_bits"].to(device)
+                c2_bits = batch["c2_bits"].to(device)
+                # bit accuracy
+                c1_pred_bits = (torch.sigmoid(c1_logits) > 0.5).float()
+                c2_pred_bits = (torch.sigmoid(c2_logits) > 0.5).float()
 
-        # sum-reduction MSE
-        mse_sum = F.mse_loss(pred_dist, dist, reduction="sum")
-        loss_sum = lw.w_dist * mse_sum
-        if lw.w_c1 > 0:
-            loss_sum = loss_sum + lw.w_c1 * bce_c1(c1_logits, c1_bits)
-        if lw.w_c2 > 0:
-            loss_sum = loss_sum + lw.w_c2 * bce_c2(c2_logits, c2_bits)
+                totals["c1_bits_correct"] += float((c1_pred_bits.eq(c1_bits)).float().sum().item())
+                totals["c2_bits_correct"] += float((c2_pred_bits.eq(c2_bits)).float().sum().item())
+                totals["n_bits_total"] += int(c1_bits.numel() + c2_bits.numel())
 
-        # bit accuracies
-        c1_pred = (torch.sigmoid(c1_logits) >= 0.5).float()
-        c2_pred = (torch.sigmoid(c2_logits) >= 0.5).float()
-        bits1 = (c1_pred.eq(c1_bits)).float().sum().item()
-        bits2 = (c2_pred.eq(c2_bits)).float().sum().item()
+                # decoded top-1 (requires codebook)
+                if codebook is not None:
+                    c1_idx_true = batch.get("c1_idx")
+                    c2_idx_true = batch.get("c2_idx")
+                    # If dataset didn't include idx for ecoc mode, create from codebook mapping order.
+                    if c1_idx_true is None or c2_idx_true is None:
+                        # we skip decoded accuracy if not available.
+                        pass
+                    else:
+                        c1_idx_true = c1_idx_true.to(device)
+                        c2_idx_true = c2_idx_true.to(device)
+                        c1_idx_pred = _hamming_decode(c1_logits, codebook)
+                        c2_idx_pred = _hamming_decode(c2_logits, codebook)
+                        totals["c1_decoded_top1"] += (c1_idx_pred == c1_idx_true).float().sum().item()
+                        totals["c2_decoded_top1"] += (c2_idx_pred == c2_idx_true).float().sum().item()
 
-        B = xyz.size(0)
-        totals["loss_sum"] += loss_sum.item()
-        totals["mse_sum"]  += mse_sum.item()
-        totals["bits1"]    += bits1
-        totals["bits2"]    += bits2
-        totals["bitsN"]    += 2 * B * c1_bits.size(1)
-        totals["n"]        += B
+            else:  # softmax
+                c1_idx = batch["c1_idx"].to(device)
+                c2_idx = batch["c2_idx"].to(device)
+                c1_top1 = c1_logits.argmax(dim=1).eq(c1_idx).float().sum().item()
+                c2_top1 = c2_logits.argmax(dim=1).eq(c2_idx).float().sum().item()
+                totals["c1_top1"] += float(c1_top1)
+                totals["c2_top1"] += float(c2_top1)
 
     n = max(1, totals["n"])
-    per_head_bits = max(1, totals["bitsN"] // 2)
-
-    return {
-        "loss":        totals["loss_sum"] / n,
-        "rmse_km":     (totals["mse_sum"] / n) ** 0.5,
-        "c1_bit_acc":  totals["bits1"] / per_head_bits,
-        "c2_bit_acc":  totals["bits2"] / per_head_bits,
+    out = {
+        "rmse_km": math.sqrt(totals["mse_sum"] / n),
     }
+    if label_mode == "ecoc":
+        if totals["n_bits_total"] > 0:
+            out["c1_bit_acc"] = totals["c1_bits_correct"] / (totals["n_bits_total"] / 2)
+            out["c2_bit_acc"] = totals["c2_bits_correct"] / (totals["n_bits_total"] / 2)
+        if codebook is not None and n > 0 and totals["c1_decoded_top1"] + totals["c2_decoded_top1"] > 0:
+            out["c1_decoded_acc"] = totals["c1_decoded_top1"] / n
+            out["c2_decoded_acc"] = totals["c2_decoded_top1"] / n
+    else:
+        if n > 0:
+            out["c1_top1"] = totals["c1_top1"] / n
+            out["c2_top1"] = totals["c2_top1"] / n
+    return out
 

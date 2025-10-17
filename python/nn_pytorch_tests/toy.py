@@ -1,107 +1,12 @@
 # python/nn_pytorch_tests/toy.py
 
 from nn_siren import SIRENLayer, SIREN
-from nir import NIRLayer, NIRTrunk, MultiHeadNIR
+from nir import NIRLayer, NIRTrunk, MultiHeadNIR, ClassHeadConfig
 import torch, torch.nn as nn, torch.nn.functional as F
 import math 
 from torch.utils.data import DataLoader
-from data import BordersParquet, LossWeights, train_one_epoch, evaluate, load_ecoc_codes
-
-class Tester:
-    def __init__(self, start, activation, params): 
-        super().__init__()
-        self.start = start
-        self.activation = activation
-        self.params = params
-        self.activation(self, ("start",), *self.params)
-
-def linear(self, vars, a, b):
-    result = a * getattr(self, vars[0]) + b
-    setattr(self, vars[0], result)
-
-#tester = Tester(3.14, linear, (2.0, 1.0))
-#print(tester.start)
-
-
-#w0 = 30.0
-#layer_counts = (256,)*5
-#siren = MultiHeadNIR(SIRENLayer, in_dim=3, layer_counts=layer_counts, params=(w0,)*5)
-
-
-def test_SIREN_1D():
-    # ---- Data: f(t) = sin(6t) + 0.5 sin(13t) ----
-    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
-    torch.manual_seed(0)
-
-    N = 65536
-    t = torch.rand(N, 1)*2 - 1                               # [-1,1]
-    f = torch.sin(6*t) + 0.5*torch.sin(13*t)
-
-    model = SIREN(in_dim=1, out_dim=1, hidden=64, depth=4, w0_first=30.0, w0_hidden=1.0).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-    t, f = t.to(device), f.to(device)
-
-    for step in range(900):
-        idx = torch.randint(0, N, (2048,), device=device)
-        pred = model(t[idx])
-        loss = F.mse_loss(pred, f[idx])
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step()
-        if step % 150 == 0:
-            print(f"step {step:4d} | mse {loss.item():.6e}")
-
-    # quick sanity: print a few predictions
-    with torch.no_grad():
-        probe = torch.linspace(-1, 1, 9, device=device).unsqueeze(1)
-        gt = torch.sin(6*probe)+0.5*torch.sin(13*probe)
-        pr = model(probe)
-        for x, g, y in zip(probe.flatten().tolist(), gt.flatten().tolist(), pr.flatten().tolist()):
-            print(f"t={x:+.2f}  gt={g:+.3f}  pred={y:+.3f}")
-            
-
-def test_SIREN_2D():
-    # ---- Data: f(t) = sin(6t) + 0.5 sin(13t) ----
-    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
-    torch.manual_seed(0)
-
-    r = 0.6
-    N = 131072
-    xy = torch.rand(N, 2)*2 - 1     # [-1,1]^2
-    dist = (xy.pow(2).sum(dim=1, keepdim=True).sqrt() - r).abs()
-
-    model = SIREN(in_dim=2, out_dim=1, hidden=128, depth=4, w0_first=30.0, w0_hidden=1.0).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-    xy, dist = xy.to(device), dist.to(device)
-
-    softplus = nn.Softplus()
-    for step in range(3000):
-        idx = torch.randint(0, N, (4096,), device=device)
-        pred = softplus(model(xy[idx]))  # keep nonnegative if you like
-        loss = F.mse_loss(pred, dist[idx])
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step()
-        if step % 300 == 0:
-            rmse = math.sqrt(loss.item())
-            print(f"step {step:4d} | rmse {rmse:.6e}")
-
-    # quick sanity: print a few predictions
-    # Inspect along a radial line (y=0)
-    with torch.no_grad():
-        xline = torch.linspace(-1, 1, 11, device=device).unsqueeze(1)
-        yzero = torch.zeros_like(xline)
-        pts = torch.cat([xline, yzero], dim=1)
-        gt = (pts.pow(2).sum(dim=1, keepdim=True).sqrt() - r).abs()
-        pr = softplus(model(pts))
-        for x, g, y in zip(xline.flatten().tolist(), gt.flatten().tolist(), pr.flatten().tolist()):
-            print(f"x={x:+.2f}  gt={g:.3f}  pred={y:.3f}")
-            
-            
+from data import BordersParquet, LossWeights, train_one_epoch, evaluate, load_ecoc_codes, BIT_LENGTH    
+import pathlib
 
 # ===================== MAIN =====================
 
@@ -109,28 +14,13 @@ def main(parquet_path, codes_path="python/geodata/countries.ecoc.json",
          batch_size=8192, epochs=10,
          layer_counts=(256,)*5, w0_first=30.0, w0_hidden=1.0,
          lr=9e-4, loss_weights=(1.0,1.0,1.0),
-         n_bits=32,
-         max_dist_km=None, device=None):
+         n_bits=BIT_LENGTH,
+         label_mode: str = "ecoc",  # 'ecoc' or 'softmax'
+         device: str | None = None):
 
-    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
-    ecoc_codes = load_ecoc_codes(codes_path)  # id(int) -> ecoc(1xn_bits)
+    print(f"Training on device: {device}")
     
-    # Datasets
-    split = (0.9, 0.1)
-    train_ds = BordersParquet(
-        parquet_path, split="train", split_frac=split,
-        codebook=ecoc_codes
-    )
-    val_ds = BordersParquet(
-        parquet_path, split="val", split_frac=split,
-        codebook=ecoc_codes
-    )
-    
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=batch_size*2, shuffle=False, num_workers=0)
-
     # Model
-
     depth = len(layer_counts)
     model = MultiHeadNIR(SIRENLayer,
                          in_dim=3,
@@ -138,61 +28,74 @@ def main(parquet_path, codes_path="python/geodata/countries.ecoc.json",
                          params=((w0_first,),)+((w0_hidden,),)*(depth-1),
                          code_bits=n_bits
                          ).to(device)
+    
+    split = (0.9, 0.1)
+    # Dataset(s)
+    if label_mode == "ecoc":
+        assert codes_path is not None, "codes_path is required for ECOC mode."
+        codebook = load_ecoc_codes(codes_path)
+        # Optional: verify bit length
+        kb = next(iter(codebook.values()))
+        assert len(kb) == n_bits, f"ECOC bits mismatch: got n_bits={n_bits}, codebook has {len(kb)}"
+        train_ds = BordersParquet(parquet_path, split="train", split_frac=split, codebook=codebook, label_mode="ecoc")
+        val_ds   = BordersParquet(parquet_path, split="val",   split_frac=split, codebook=codebook, label_mode="ecoc")
+        class_cfg = ClassHeadConfig(class_mode="ecoc", n_bits=n_bits)
+        print(f"ECOC: {n_bits} bits/head; codebook loaded from {codes_path}")
+    elif label_mode == "softmax":
+        codebook = None
+        train_ds = BordersParquet(parquet_path, split="train", split_frac=split, codebook=None, label_mode="softmax")
+        val_ds   = BordersParquet(parquet_path, split="val",   split_frac=split, codebook=None, label_mode="softmax")
+        class_cfg = ClassHeadConfig(
+            class_mode="softmax",
+            n_classes_c1=train_ds.num_classes_c1,
+            n_classes_c2=train_ds.num_classes_c2,
+        )
+    else:
+        raise ValueError("label_mode must be 'ecoc' or 'softmax'")
+
+    
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=False)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
 
     # Optim
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-
     lw = LossWeights(*loss_weights)
-    print(f"Training on device: {device}")
-    print(f"ECOC: {n_bits} bits/head; codebook loaded from {codes_path}")
+    
 
-    best = None
+    best_val = math.inf
     for ep in range(1, epochs+1):
-        tr = train_one_epoch(model, train_loader, opt, device, lw, max_dist_km=max_dist_km)
-        va = evaluate(model, val_loader, device, lw, max_dist_km=max_dist_km)
-        line = (f"[{ep:03d}] "
-                f"train rmse={tr['rmse_km']:.3f}km c1={tr['c1_bit_acc']:.3f} c2={tr['c2_bit_acc']:.3f} | "
-                f"val rmse={va['rmse_km']:.3f}km c1={va['c1_bit_acc']:.3f} c2={va['c2_bit_acc']:.3f}")
+        tr = train_one_epoch(model, train_loader, opt, device, lw, label_mode=class_cfg.class_mode)
+        va = evaluate(model, val_loader, device, lw, label_mode=class_cfg.class_mode, codebook=codebook)
+        line = (f"[{ep:02d}] train: {tr}  |  val: {va}")
         print(line)
-        # Track best by val RMSE + (1-acc) penalties
-        score = va["rmse_km"] + (1.0 - va["c1_bit_acc"]) + (1.0 - va["c2_bit_acc"])
-        if best is None or score < best[0]:
-            best = (score, {k:float(v) for k,v in va.items()})
-            torch.save({
+        
+        if va["rmse_km"] < best_val:
+            best_val = va["rmse_km"]
+            if label_mode == "ecoc":
+                best_val + (1.0 - va["c1_decoded_acc"]) + (1.0 - va["c1_decoded_acc"])
+            else: 
+                best_val + (1.0 - va["c1_top1"]) + (1.0 - va["c2_top1"])
+    
+            ckpt = {
                 "model": model.state_dict(),
-                "ecoc": {
-                    "bits": n_bits,
-                    "codes_path": codes_path 
-                }
-            }, "python/nn_checkpoints/siren_best.pt")
-            print("  ↳ saved checkpoint: siren_best.pt")
-
-def sanity():
-    alpha = 1.0
-    w = 0.5
-    m = 2
-    x = torch.rand(4, 3)  # (B, D)
-    
-    if x.dim == 1:
-        x.unsqueeze(0)
-    
-    bands =  alpha * (w ** torch.arange(m)).float() 
-    # (B, 1, D) * (L,)->(1, L, 1)  => (B, L, D)
-    xb = x.unsqueeze(1) * bands.view(1, -1, 1)
-    # sin/cos then concat along feature axis: (B, L*D*2)
-    enc_sin = torch.sin(xb)
-    enc_cos = torch.cos(xb)
-    out = torch.cat([enc_sin, enc_cos], dim=1).reshape(x.shape[0], -1)
-    return out
+                "config": {
+                    "label_mode": class_cfg.class_mode,
+                    "n_bits": getattr(class_cfg, "n_bits", None),
+                    "n_classes_c1": getattr(class_cfg, "n_classes_c1", None),
+                    "n_classes_c2": getattr(class_cfg, "n_classes_c2", None),
+                     "layers": layer_counts,
+                },
+            }
+            out_path = pathlib.Path("python/nn_checkpoints")
+            out_path.mkdir(parents=True, exist_ok=True)
+            save_path = out_path / "siren_best.pt"
+            torch.save(ckpt, save_path)
+            print(f"  ↳ saved checkpoint: {save_path}")
 
 if __name__ == "__main__":
+    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
     PATH = "python/geodata/parquet/dataset_all.parquet"
-    #main(PATH,
-    #     epochs=20)
-    w = torch.tensor(2.)
-    m = 4
-    base = torch.pow(w, 1/m)
-    out = base ** torch.arange(m)
-    print(out)
+    main(PATH, epochs=20, device=device)
+
 
     
