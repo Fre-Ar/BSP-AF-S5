@@ -1,7 +1,10 @@
+# python/nn_pytorch_tests/compare_data_viz.py
+
+
 import json, math, numpy as np, pandas as pd, torch
 from torch.utils.data import DataLoader
 from visualizer import plot_geopandas, overrides as new_hash
-from siren import SIRENLayer, SIREN
+from python.nn_pytorch_tests.nn_siren import SIRENLayer, SIREN
 from nir import NIRLayer, NIRTrunk, MultiHeadNIR
 from data import BordersParquet, LossWeights, train_one_epoch, evaluate, load_ecoc_codes
 import matplotlib.pyplot as plt

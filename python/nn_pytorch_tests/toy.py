@@ -1,4 +1,6 @@
-from siren import SIRENLayer, SIREN
+# python/nn_pytorch_tests/toy.py
+
+from nn_siren import SIRENLayer, SIREN
 from nir import NIRLayer, NIRTrunk, MultiHeadNIR
 import torch, torch.nn as nn, torch.nn.functional as F
 import math 
@@ -165,8 +167,32 @@ def main(parquet_path, codes_path="python/geodata/countries.ecoc.json",
             }, "python/nn_checkpoints/siren_best.pt")
             print("  ↳ saved checkpoint: siren_best.pt")
 
+def sanity():
+    alpha = 1.0
+    w = 0.5
+    m = 2
+    x = torch.rand(4, 3)  # (B, D)
+    
+    if x.dim == 1:
+        x.unsqueeze(0)
+    
+    bands =  alpha * (w ** torch.arange(m)).float() 
+    # (B, 1, D) * (L,)->(1, L, 1)  => (B, L, D)
+    xb = x.unsqueeze(1) * bands.view(1, -1, 1)
+    # sin/cos then concat along feature axis: (B, L*D*2)
+    enc_sin = torch.sin(xb)
+    enc_cos = torch.cos(xb)
+    out = torch.cat([enc_sin, enc_cos], dim=1).reshape(x.shape[0], -1)
+    return out
+
 if __name__ == "__main__":
     PATH = "python/geodata/parquet/dataset_all.parquet"
-    main(PATH,
-         epochs=20)
+    #main(PATH,
+    #     epochs=20)
+    w = torch.tensor(2.)
+    m = 4
+    base = torch.pow(w, 1/m)
+    out = base ** torch.arange(m)
+    print(out)
+
     
