@@ -20,8 +20,8 @@ class GAUSSLayer(NIRLayer):
     def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True):
         # fixed bandwidth hyperparameter (saved in checkpoints but not optimized)
         self.s = params[0]
-        self.register_buffer(f"s{ith_layer}", torch.tensor(float(self.s)))
         super().__init__(Gauss(self.s), in_dim, out_dim, ith_layer, bias)
+        self.register_buffer(f"s{ith_layer}", torch.tensor(float(self.s)))
         self.reset_parameters()
 
     def reset_parameters(self):

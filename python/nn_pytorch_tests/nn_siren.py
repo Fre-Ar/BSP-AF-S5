@@ -20,8 +20,8 @@ class SIRENLayer(NIRLayer):
     """
     def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True):
         self.w = params[0]
-        self.register_buffer(f"w{ith_layer}", torch.tensor(float(self.w)))
         super().__init__(Sine(self.w), in_dim, out_dim, ith_layer, bias)
+        self.register_buffer(f"w{ith_layer}", torch.tensor(float(self.w)))
         self.reset_parameters()
 
     def reset_parameters(self):

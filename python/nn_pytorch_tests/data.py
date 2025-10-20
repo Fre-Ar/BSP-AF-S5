@@ -10,6 +10,7 @@ from torch.utils.data import Dataset, DataLoader
 import pandas as pd, numpy as np
 from tqdm import tqdm
 import json
+from loss import UncertaintyWeighting
 
 # ===================== ECOC =====================
 
@@ -159,12 +160,12 @@ class BordersParquet(Dataset):
         item = {
             "xyz":       self.xyz[i],        # (3,)
             "dist":      self.dist[i],       # (1,)
-            "c1_bits":   self.c1_bits[i],    # (32,)
-            "c2_bits":   self.c2_bits[i],    # (32,)
+            "c1_idx":    self.c1_id[i],
+            "c2_idx":    self.c2_id[i],   
         }
         if self.label_mode == "ecoc":
-            item["c1_bits"] = self.c1_bits[i]
-            item["c2_bits"] = self.c2_bits[i]
+            item["c1_bits"] = self.c1_bits[i] # (32,)
+            item["c2_bits"] = self.c2_bits[i] # (32,)
         return item
 
 # ===================== TRAINING =====================
@@ -180,7 +181,8 @@ def train_one_epoch(model: nn.Module,
                     optimizer: torch.optim.Optimizer,
                     device: torch.device | str,
                     lw: LossWeights,
-                    label_mode: LabelMode
+                    label_mode: LabelMode,
+                    uw: UncertaintyWeighting | None = None
                     ) -> dict:
     """
     Trains for one epoch on batches containing:
@@ -211,7 +213,7 @@ def train_one_epoch(model: nn.Module,
     mse = nn.MSELoss(reduction="mean")
     bce = nn.BCEWithLogitsLoss(reduction="mean")
     ce = nn.CrossEntropyLoss(reduction="mean")
-
+    
     pbar = tqdm(loader, leave=False)
     for batch in pbar:
         xyz       = batch["xyz"].to(device)           # (B,3)
@@ -235,12 +237,17 @@ def train_one_epoch(model: nn.Module,
             loss_c1 = ce(c1_logits, c1_idx)
             loss_c2 = ce(c2_logits, c2_idx)
         
-        loss = lw.w_dist * loss_dist + lw.w_c1 * loss_c1 + lw.w_c2 * loss_c2
+       
+        if uw:
+            loss = uw([lw.w_dist * loss_dist, lw.w_c1 * loss_c1, lw.w_c2 * loss_c2])
+        else:
+            loss = lw.w_dist * loss_dist + lw.w_c1 * loss_c1 + lw.w_c2 * loss_c2
         loss.backward()
+        
         optimizer.step()
 
         with torch.no_grad():
-            B = xyz.shape(0)
+            B = xyz.size(0)
             totals["loss"] += float(loss.detach()) * B
             totals["mse_sum"] += F.mse_loss(pred_dist.detach(), dist, reduction="sum").float()
             totals["c1_loss"] += float(loss_c1.detach()) * B
@@ -272,9 +279,10 @@ def train_one_epoch(model: nn.Module,
 def evaluate(model: nn.Module,
              loader: DataLoader,
              device: torch.device | str,
-             label_mode: LabelMode,
              lw: LossWeights,
-             codebook: Optional[Dict[int, np.ndarray]] = None):
+             label_mode: LabelMode,
+             codebook: Optional[Dict[int, np.ndarray]] = None,
+             uw: UncertaintyWeighting | None = None):
     """
     Validation loop (no grad). Expects batches with: xyz, dist, c1_bits, c2_bits.
     Model must return: (pred_dist, c1_logits, c2_logits).

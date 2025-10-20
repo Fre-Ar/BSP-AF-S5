@@ -289,4 +289,4 @@ def show_dist_plot():
                    log_scale=True) 
 #show_c1_plot()
 #show_c2_plot()
-show_dist_plot()
+#show_dist_plot()

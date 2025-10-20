@@ -9,8 +9,8 @@ class ReLULayer(NIRLayer):
     """
     Simple ReLU NIRLayer
     """
-    def __init__(self, in_dim: int, out_dim: int, ith_layer: int, bias=True):
-        super().__init__(nn.ReLU, in_dim, out_dim, ith_layer, bias)
+    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True):
+        super().__init__(nn.ReLU(), in_dim, out_dim, ith_layer, bias)
         self.reset_parameters()
 
     def reset_parameters(self):

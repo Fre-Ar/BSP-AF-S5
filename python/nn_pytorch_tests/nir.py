@@ -18,15 +18,15 @@ class NIRLayer(nn.Module):
         self.out_dim = out_dim
         self.ith_layer = ith_layer
         self.complex = complex
-        dtype = torch.cfloat if complex else torch.get_default_dtype
+        dtype = torch.cfloat if complex else torch.get_default_dtype()
         self.linear = nn.Linear(in_dim, out_dim, bias=bias, dtype=dtype)
         self.activation = activation
 
     def forward(self, x):
-        if complex and (not torch.is_complex(x)):
+        if self.complex and (not torch.is_complex(x)):
             x = x.to(torch.cfloat)
         y = self.activation(self.linear(x))
-        if complex and self.ith_layer < 0:
+        if self.complex and self.ith_layer < 0:
             y = y.real
         return y
 
@@ -76,22 +76,39 @@ class MultiHeadNIR(nn.Module):
       - c2: classification (adjacent country via ECOC or softmax)
     """
     def __init__(self, layer: NIRLayer,
-                 encoder: Optional[EncodingBase],
+                 encoder: Optional[EncodingBase] = None,
                  in_dim=3,
                  layer_counts: tuple = (256,)*5,
                  params: tuple = (1.0,),
                  encoder_params: Optional[tuple] = None,
-                 class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32),):
+                 class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32),
+                 head_layers = (),
+                 head_activation: Optional[nn.Module] = None):
         super().__init__()
         # Trunk
         self.class_cfg = class_cfg
         self.trunk = NIRTrunk(layer, encoder, in_dim, layer_counts, params=params, encoder_params=encoder_params)
         
+        act = head_activation if head_activation is not None else nn.ReLU(inplace=True)
+
+        def _init_linear(m: nn.Module):
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        
+        head_counts = (layer_counts[-1],) + head_layers
+
         # Distance head
-        self.dist_head = nn.Linear(layer_counts[-1], 1)
-        nn.init.xavier_uniform_(self.dist_head.weight)
-        nn.init.zeros_(self.dist_head.bias)
+        dist_layers = []
+        for i in range(1, len(head_counts)-1):
+            dist_layers += [nn.Linear(head_counts[i-1], head_counts[i]), act] 
+        dist_layers +=  [nn.Linear(head_counts[-1], 1)]    
+           
+        self.dist_head = nn.Sequential(*dist_layers)
+        self.dist_head.apply(_init_linear)
         self.softplus = nn.Softplus()
+
         
         # Classification heads
         if class_cfg.class_mode == "ecoc":
@@ -106,12 +123,19 @@ class MultiHeadNIR(nn.Module):
         else:  # pragma: no cover
             raise ValueError(f"Unknown class_mode={class_cfg.class_mode}")
         
-        self.c1_head   = nn.Linear(layer_counts[-1], out_c1)
-        self.c2_head   = nn.Linear(layer_counts[-1], out_c2)
-        nn.init.xavier_uniform_(self.c1_head.weight)
-        nn.init.zeros_(self.c1_head.bias)
-        nn.init.xavier_uniform_(self.c2_head.weight)
-        nn.init.zeros_(self.c2_head.bias)
+        c1_layers = []
+        for i in range(1, len(head_counts)-1):
+            c1_layers += [nn.Linear(head_counts[i-1], head_counts[i]), act] 
+        c1_layers +=  [nn.Linear(head_counts[-1], out_c1)]    
+        self.c1_head = nn.Sequential(*c1_layers)
+        self.c1_head.apply(_init_linear)
+
+        c2_layers = []
+        for i in range(1, len(head_counts)-1):
+            c2_layers += [nn.Linear(head_counts[i-1], head_counts[i]), act] 
+        c2_layers +=  [nn.Linear(head_counts[-1], out_c2)]  
+        self.c2_head = nn.Sequential(*c2_layers)
+        self.c2_head.apply(_init_linear)
 
     def forward(self, x):
         h = self.trunk(x)              # (B, hidden)

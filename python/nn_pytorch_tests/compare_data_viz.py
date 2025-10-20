@@ -4,8 +4,9 @@
 import json, math, numpy as np, pandas as pd, torch
 from torch.utils.data import DataLoader
 from visualizer import plot_geopandas, overrides as new_hash
-from python.nn_pytorch_tests.nn_siren import SIRENLayer, SIREN
-from nir import NIRLayer, NIRTrunk, MultiHeadNIR
+from nn_siren import SIRENLayer, SIREN
+from nn_relu import ReLULayer
+from nir import NIRLayer, NIRTrunk, MultiHeadNIR, ClassHeadConfig
 from data import BordersParquet, LossWeights, train_one_epoch, evaluate, load_ecoc_codes
 import matplotlib.pyplot as plt
 import geopandas as gpd
@@ -63,8 +64,9 @@ def _plot_green_red(lon, lat, ok_mask, title, figsize=(11,5), s=3, alpha=0.9):
 def compare_parquet_and_model_ecoc(
     parquet_path: str,
     checkpoint_path: str,
-    codes_path: str,
     model_builder,                 # callable that rebuilds SAME arch as training
+    label_mode: str = "auto",
+    codes_path: str| None = None,
     sample: int | None = 200_000,
     batch_size: int = 131_072,
     device: str | None = None,
@@ -95,29 +97,39 @@ def compare_parquet_and_model_ecoc(
     y_c1_id   = df["c1_id"].to_numpy(dtype=np.int64)
     y_c2_id   = df["c2_id"].to_numpy(dtype=np.int64)
 
-    # load codebook (id -> bits np.uint8[K])
-    codebook = load_ecoc_codes(codes_path)
-    # infer K (or use n_bits)
-    K_inf = int(next(iter(codebook.values())).shape[0])
-    K = n_bits if n_bits is not None else K_inf
-
-    # build [C,K] bits and [C] ids
-    all_ids_np = np.array(sorted(codebook.keys()), dtype=np.int64)
-    C = all_ids_np.shape[0]
-    M = np.zeros((C, K), dtype=np.uint8)
-    for i, cid in enumerate(all_ids_np):
-        v = codebook[cid]
-        if v.shape[0] < K:
-            raise ValueError(f"Code for class {cid} has length {v.shape[0]} < requested {K}")
-        M[i, :] = v[:K].astype(np.uint8)
-    bits = torch.from_numpy(M.astype(np.float32))
-    all_ids = torch.from_numpy(all_ids_np)
-
-    # checkpoint & model
+    # checkpoint and config
     ckpt = torch.load(checkpoint_path, map_location="cpu")
+    cfg = ckpt.get("config", {})
+    lm = label_mode
+    if lm == "auto":
+        lm = cfg.get("label_mode", "ecoc")
+    if lm not in {"ecoc", "softmax"}:
+        raise ValueError(f"label_mode must be 'auto'|'ecoc'|'softmax', got {lm}")
+
+    if lm == "ecoc":
+        n_bits = int(cfg.get("n_bits", 32))
+        class_cfg = ClassHeadConfig(class_mode="ecoc", n_bits=n_bits)
+    else:
+        n_c1 = int(cfg.get("n_classes_c1", 289))
+        n_c2 = int(cfg.get("n_classes_c2", 289))
+        class_cfg = ClassHeadConfig(class_mode="softmax", n_classes_c1=n_c1, n_classes_c2=n_c2)
+
+    # model
     model = model_builder().to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
+    
+    # For ECOC mode, build bits matrix
+    if lm == "ecoc":
+        if codes_path is None:
+            raise ValueError("ECOC mode requires codes_path to the ECOC JSON codebook.")
+        codebook = load_ecoc_codes(codes_path)
+        ids, bits = codebook_to_bits_matrix(codebook, n_bits=class_cfg.n_bits)
+        ids = torch.from_numpy(ids).to(device)
+        bits = bits.to(device)
+    else:
+        ids = None
+        bits = None
 
     # inference
     N = xyz.shape[0]
@@ -126,34 +138,28 @@ def compare_parquet_and_model_ecoc(
     pred_c2   = np.zeros(N, dtype=np.int64)
 
     with torch.no_grad():
-        bits = bits.to(device)
-        all_ids = all_ids.to(device)
         for s in range(0, N, batch_size):
             e = min(N, s + batch_size)
             u = torch.from_numpy(xyz[s:e]).to(device)
-            out = model(u)
-            if not (isinstance(out, (tuple, list)) and len(out) >= 3):
-                raise RuntimeError("Model must return (distance, logits_c1_bits, logits_c2_bits).")
-            d_hat, logits_c1, logits_c2 = out[:3]
+            
+            d_hat, logits_c1, logits_c2 = model(u)
             d_hat = d_hat.squeeze(-1)
 
             if not model_outputs_km:
                 d_hat = d_hat * earth_radius_km
 
-            # soft ECOC decoding
-            z1 = logits_c1.unsqueeze(1)  # [B,1,K]
-            z2 = logits_c2.unsqueeze(1)
-            b  = bits.unsqueeze(0)       # [1,C,K]
-
-            s1 = b * torch.nn.functional.logsigmoid(z1) + (1 - b) * torch.nn.functional.logsigmoid(-z1)
-            s2 = b * torch.nn.functional.logsigmoid(z2) + (1 - b) * torch.nn.functional.logsigmoid(-z2)
-
-            c1_idx = s1.sum(dim=-1).argmax(dim=1)  # [B]
-            c2_idx = s2.sum(dim=-1).argmax(dim=1)  # [B]
+            if lm == "ecoc":
+                # decode via soft ECOC score
+                c1_idx = soft_ecoc_argmax(logits_c1, bits)  # indices into 'ids' vector
+                c2_idx = soft_ecoc_argmax(logits_c2, bits)
+                pred_c1[s:e] = ids[c1_idx].long().cpu().numpy()
+                pred_c2[s:e] = ids[c2_idx].long().cpu().numpy()
+            else:
+                # softmax argmax (class indices assumed to match dataset ids 0..C-1)
+                pred_c1[s:e] = logits_c1.argmax(dim=1).long().cpu().numpy()
+                pred_c2[s:e] = logits_c2.argmax(dim=1).long().cpu().numpy()
 
             pred_dist[s:e] = d_hat.float().cpu().numpy()
-            pred_c1[s:e]   = all_ids[c1_idx].cpu().numpy()
-            pred_c2[s:e]   = all_ids[c2_idx].cpu().numpy()
 
     # === PREDICTIONS-ONLY MODE ===
     if predictions_only:
@@ -231,28 +237,41 @@ def compare_parquet_and_model_ecoc(
         "pred_dist": pred_dist
     }
 
-    
+mode = "ecoc" 
     
 def build_model_for_eval():
-    depth = 5
+    depth = 6
     layer_counts = (256,)*depth
-    return MultiHeadNIR(
+    cfg = ClassHeadConfig(class_mode=mode,
+                        n_bits=32,
+                        n_classes_c1=289,
+                        n_classes_c2=289)
+    w0 = 30.0
+    w_h = 1.0
+    model = MultiHeadNIR(
         SIRENLayer,
         in_dim=3,
         layer_counts=layer_counts,
-        params=((30.0,),)+((1.0,),)*(depth-1),
-        code_bits=32
-    )
+        params=((w0,),)+((w_h,),)*(depth-1),
+        class_cfg = cfg)
+    '''model = MultiHeadNIR(
+        ReLULayer,
+        in_dim=3,
+        layer_counts=layer_counts,
+        params=((),)+((),)*(depth-1),
+        class_cfg = cfg)'''
+    return model
+
 
 
 
 compare_parquet_and_model_ecoc(
     parquet_path="python/geodata/parquet/dataset_all.parquet",
-    checkpoint_path="python/nn_checkpoints/siren_best.pt",
+    checkpoint_path=f"python/nn_checkpoints/siren_{mode}_1M_6x256_fixed_lw.pt",
     codes_path="python/geodata/countries.ecoc.json",
     model_builder=build_model_for_eval,
     sample=1_000_000,
     model_outputs_km=True
-    #,predictions_only=True
+    ,predictions_only=True
     ,overrides=new_hash
 )

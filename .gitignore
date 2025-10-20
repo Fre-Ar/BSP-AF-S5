@@ -6,6 +6,10 @@
 *.parquet
 parquet/
 bench/
+nn_checkpoints/
+*.pt
+*.json
+*.DS_Store
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
