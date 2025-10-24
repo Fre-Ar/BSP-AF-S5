@@ -82,7 +82,7 @@ class MultiHeadNIR(nn.Module):
                  params: tuple = (1.0,),
                  encoder_params: Optional[tuple] = None,
                  class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32),
-                 head_layers = (),
+                 head_layers: tuple = (),
                  head_activation: Optional[nn.Module] = None):
         super().__init__()
         # Trunk
@@ -101,7 +101,7 @@ class MultiHeadNIR(nn.Module):
 
         # Distance head
         dist_layers = []
-        for i in range(1, len(head_counts)-1):
+        for i in range(1, len(head_counts)):
             dist_layers += [nn.Linear(head_counts[i-1], head_counts[i]), act] 
         dist_layers +=  [nn.Linear(head_counts[-1], 1)]    
            
@@ -124,14 +124,14 @@ class MultiHeadNIR(nn.Module):
             raise ValueError(f"Unknown class_mode={class_cfg.class_mode}")
         
         c1_layers = []
-        for i in range(1, len(head_counts)-1):
+        for i in range(1, len(head_counts)):
             c1_layers += [nn.Linear(head_counts[i-1], head_counts[i]), act] 
         c1_layers +=  [nn.Linear(head_counts[-1], out_c1)]    
         self.c1_head = nn.Sequential(*c1_layers)
         self.c1_head.apply(_init_linear)
 
         c2_layers = []
-        for i in range(1, len(head_counts)-1):
+        for i in range(1, len(head_counts)):
             c2_layers += [nn.Linear(head_counts[i-1], head_counts[i]), act] 
         c2_layers +=  [nn.Linear(head_counts[-1], out_c2)]  
         self.c2_head = nn.Sequential(*c2_layers)

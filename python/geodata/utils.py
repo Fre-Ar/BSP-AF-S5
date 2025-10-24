@@ -1,6 +1,8 @@
 # python/geodata/utils.py
 import numpy as np, pandas as pd, os, pyarrow as pa, pyarrow.parquet as pq
 
+# TODO: make it work with log1p_dist
+
 POINTS_DTYPE = {
     "lon": np.float32, "lat": np.float32,
     "x": np.float32, "y": np.float32, "z": np.float32,

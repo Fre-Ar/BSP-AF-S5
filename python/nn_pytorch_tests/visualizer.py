@@ -264,7 +264,7 @@ overrides={
     180: "#000000"        
 }
 
-PLOT = "python/geodata/parquet/dataset_200k.parquet"
+PLOT = "python/geodata/parquet/log_dataset_1M.parquet"
 
 def show_c1_plot():
     plot_geopandas(PLOT,

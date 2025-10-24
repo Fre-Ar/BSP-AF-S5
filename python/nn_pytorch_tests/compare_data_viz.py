@@ -10,6 +10,8 @@ from nir import NIRLayer, NIRTrunk, MultiHeadNIR, ClassHeadConfig
 from data import BordersParquet, LossWeights, train_one_epoch, evaluate, load_ecoc_codes
 import matplotlib.pyplot as plt
 import geopandas as gpd
+import torch.nn.functional as F
+from stats import ecoc_prevalence_by_bit, pos_weight_from_prevalence
 
 def codebook_to_bits_matrix(codebook: dict[int, np.ndarray], n_bits: int | None = None):
     """
@@ -30,16 +32,34 @@ def codebook_to_bits_matrix(codebook: dict[int, np.ndarray], n_bits: int | None 
     bits = torch.from_numpy(M.astype(np.float32))
     return ids, bits  # ids: np.int64[C], bits: torch.FloatTensor[C,K]
 
-def soft_ecoc_argmax(logits: torch.Tensor, bits: torch.Tensor) -> torch.Tensor:
+@torch.no_grad()
+def _ecoc_decode_soft_logits(
+    logits: torch.Tensor,      # [B, K] pre-sigmoid
+    bits: torch.Tensor,        # [C, K] 0/1 codes (same device/dtype as logits)
+    pos_weight=None            # None | scalar | [K] tensor
+) -> torch.Tensor:
     """
-    logits: [B,K] model logits (pre-sigmoid)
-    bits:   [C,K] 0/1 codes (float, same device)
-    Returns: [B] class index (0..C-1) maximizing soft log-likelihood.
+    Soft ECOC decoding that matches BCEWithLogitsLoss(pos_weight):
+      - Apply per-bit logit shift tau_k = -log(w_k) (if pos_weight given)
+      - Score each class with sum_k [ b_k*logsigmoid(z_k - tau_k) + (1-b_k)*logsigmoid(-(z_k - tau_k)) ]
+      - Return argmax over classes (0..C-1), i.e., indices into 'ids'
     """
-    z = logits.unsqueeze(1)  # [B,1,K]
-    b = bits.unsqueeze(0)    # [1,C,K]
-    score = b * torch.nn.functional.logsigmoid(z) + (1 - b) * torch.nn.functional.logsigmoid(-z)
-    return score.sum(dim=-1).argmax(dim=1)
+    if pos_weight is None:
+        z_adj = logits
+    else:
+        if not torch.is_tensor(pos_weight):
+            pos_weight = torch.tensor(pos_weight, dtype=logits.dtype, device=logits.device)
+        else:
+            pos_weight = pos_weight.to(dtype=logits.dtype, device=logits.device)
+        if pos_weight.numel() == 1:
+            pos_weight = pos_weight.expand(logits.shape[1])   # [K]
+        tau = (-torch.log(pos_weight)).view(1, -1)            # [1,K]
+        z_adj = logits - tau
+
+    Z = z_adj.unsqueeze(1)            # [B,1,K]
+    BITS = bits.unsqueeze(0)          # [1,C,K]
+    score = BITS * F.logsigmoid(Z) + (1.0 - BITS) * F.logsigmoid(-Z)  # [B,C,K]
+    return score.sum(dim=-1).argmax(dim=1)  
 
 # ---------- green/red quick scatter ----------
 def _plot_green_red(lon, lat, ok_mask, title, figsize=(11,5), s=3, alpha=0.9):
@@ -71,10 +91,11 @@ def compare_parquet_and_model_ecoc(
     batch_size: int = 131_072,
     device: str | None = None,
     n_bits: int | None = None,     # if None, inferred from codebook
-    model_outputs_km: bool = True,
+    model_outputs_log1p: bool = True,
     earth_radius_km: float = 6371.0,
     predictions_only: bool = False, # <-- just show model predictions
-    overrides=None
+    overrides=None,
+    use_bayes_thr: bool = True
 ):
     # device
     if device is None:
@@ -84,7 +105,7 @@ def compare_parquet_and_model_ecoc(
         else: device = "cpu"
 
     # load parquet
-    cols = ["lon","lat","x","y","z","dist_km","c1_id","c2_id"]
+    cols = ["lon","lat","x","y","z","dist_km", "log1p_dist","c1_id","c2_id"]
     df = pd.read_parquet(parquet_path, columns=cols)
     if sample and len(df) > sample:
         df = df.sample(sample, random_state=0).reset_index(drop=True)
@@ -94,6 +115,7 @@ def compare_parquet_and_model_ecoc(
     xyz = (xyz / np.clip(nrm, 1e-9, None)).astype(np.float32)
 
     y_dist_km = df["dist_km"].to_numpy(dtype=np.float32)
+    y_log1p_dist = df["log1p_dist"].to_numpy(dtype=np.float32)
     y_c1_id   = df["c1_id"].to_numpy(dtype=np.int64)
     y_c2_id   = df["c2_id"].to_numpy(dtype=np.int64)
 
@@ -145,13 +167,25 @@ def compare_parquet_and_model_ecoc(
             d_hat, logits_c1, logits_c2 = model(u)
             d_hat = d_hat.squeeze(-1)
 
-            if not model_outputs_km:
-                d_hat = d_hat * earth_radius_km
+            if model_outputs_log1p:
+                d_km = torch.expm1(d_hat)  # convert log1p(dist_km) -> dist_km
+            else:
+                # fallback: assume it's already in km (legacy)
+                d_km = d_hat
 
             if lm == "ecoc":
                 # decode via soft ECOC score
-                c1_idx = soft_ecoc_argmax(logits_c1, bits)  # indices into 'ids' vector
-                c2_idx = soft_ecoc_argmax(logits_c2, bits)
+                if use_bayes_thr:
+                    ones_c1, totals_c1, p1_c1 = ecoc_prevalence_by_bit(parquet_path, codebook, id_col="c1_id")
+                    ones_c2, totals_c2, p1_c2 = ecoc_prevalence_by_bit(parquet_path, codebook, id_col="c2_id")
+
+                    pw_c1 = pos_weight_from_prevalence(p1_c1)
+                    pw_c2 = pos_weight_from_prevalence(p1_c2)
+                else:
+                    pw_c1 = None
+                    pw_c2 = None
+                c1_idx = _ecoc_decode_soft_logits(logits_c1, bits, pos_weight=pw_c1)  # indices into 'ids'
+                c2_idx = _ecoc_decode_soft_logits(logits_c2, bits, pos_weight=pw_c2)
                 pred_c1[s:e] = ids[c1_idx].long().cpu().numpy()
                 pred_c2[s:e] = ids[c2_idx].long().cpu().numpy()
             else:
@@ -159,7 +193,7 @@ def compare_parquet_and_model_ecoc(
                 pred_c1[s:e] = logits_c1.argmax(dim=1).long().cpu().numpy()
                 pred_c2[s:e] = logits_c2.argmax(dim=1).long().cpu().numpy()
 
-            pred_dist[s:e] = d_hat.float().cpu().numpy()
+            pred_dist[s:e] = d_km.float().cpu().numpy()
 
     # === PREDICTIONS-ONLY MODE ===
     if predictions_only:
@@ -239,21 +273,25 @@ def compare_parquet_and_model_ecoc(
 
 mode = "ecoc" 
     
+DEPTH = 15
+LAYER = 128
+w0 = 60.0  
+    
 def build_model_for_eval():
-    depth = 6
-    layer_counts = (256,)*depth
+    layer_counts = (LAYER,)*DEPTH
     cfg = ClassHeadConfig(class_mode=mode,
                         n_bits=32,
                         n_classes_c1=289,
                         n_classes_c2=289)
-    w0 = 30.0
     w_h = 1.0
     model = MultiHeadNIR(
         SIRENLayer,
         in_dim=3,
         layer_counts=layer_counts,
-        params=((w0,),)+((w_h,),)*(depth-1),
-        class_cfg = cfg)
+        params=((w0,),)+((w_h,),)*(DEPTH-1),
+        class_cfg = cfg
+        #,head_layers=(LAYER,)
+        )
     '''model = MultiHeadNIR(
         ReLULayer,
         in_dim=3,
@@ -262,16 +300,20 @@ def build_model_for_eval():
         class_cfg = cfg)'''
     return model
 
+#model_path = f"python/nn_checkpoints/siren_{mode}_1M_{DEPTH}x{LAYER}_0h_w{w0}_bayes_thr_200e.pt"
+model_path = f"python/nn_checkpoints/siren_{mode}_1M_{DEPTH}x{LAYER}_0h_w{w0}_post.pt"
 
-
-
-compare_parquet_and_model_ecoc(
-    parquet_path="python/geodata/parquet/dataset_all.parquet",
-    checkpoint_path=f"python/nn_checkpoints/siren_{mode}_1M_6x256_fixed_lw.pt",
-    codes_path="python/geodata/countries.ecoc.json",
-    model_builder=build_model_for_eval,
-    sample=1_000_000,
-    model_outputs_km=True
-    ,predictions_only=True
-    ,overrides=new_hash
-)
+def run():
+    compare_parquet_and_model_ecoc(
+        parquet_path="python/geodata/parquet/log_dataset_1M.parquet",
+        checkpoint_path=model_path,
+        codes_path="python/geodata/countries.ecoc.json",
+        model_builder=build_model_for_eval,
+        sample=1_000_000,
+        model_outputs_log1p = True
+        ,predictions_only=True
+        ,overrides=new_hash
+        , use_bayes_thr = False
+    )
+    
+run()

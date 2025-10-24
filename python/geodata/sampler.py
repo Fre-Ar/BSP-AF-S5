@@ -1,6 +1,6 @@
 # python/geodata/sampler.py
 """
-Minimal, production-ready generator for (lon, lat, x, y, z, dist_km, c1_id, c2_id, is_border, r_band)
+Minimal, production-ready generator for (lon, lat, x, y, z, dist_km, log1p_dist, c1_id, c2_id, is_border, r_band)
 saved as **one Parquet file**.
 
 Key choices:
@@ -23,6 +23,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import defaultdict
 
 # --- third-party
+import torch
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -125,10 +126,58 @@ def greatcircle_point_segment_dist_km(p_lon, p_lat, a_lon, a_lat, b_lon, b_lat) 
 
 # --------------------------- sampling logic -------------------------
 
+def _sample_distance_km_test(batch_size: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Piecewise log-uniform bands favoring near-border points.
+
+    Bands (r = 0..6):
+      r0:  [0.01, 1)   km
+      r1:  [1,    5)   km
+      r2:  [5,    10)  km
+      r3:  [10,   25)  km
+      r4:  [25,   50)  km
+      r5:  [50,  150)  km 
+      r6:  [150,  500] km
+
+    Sampling probabilities (sum to 1 across these bands):
+      p ∝ {22, 18, 15, 8, 4, 2, 1}  ->  [0.3142857, 0.2571429, 0.2142857, 0.1142857, 0.0571429, 0.0285714, 0.0142857]
+
+    Note: r255 ("uniform globe") is handled elsewhere and not sampled here.
+    """
+    # Bands low/high (km). Use a small >0 lower bound for r0 to avoid log(0).
+    lows  = np.array([0.01,  1.0,   5.0,   10.0,  25.0, 150.0, 150.0], dtype=np.float32)
+    highs = np.array([1.0,   5.0,  10.0,   25.0,  50.0, 150.0, 500.0], dtype=np.float32)
+    # Probabilities normalized from {22,18,15,8,4,2,1}
+    p_raw = np.array([22, 18, 15, 8, 4, 2, 1], dtype=np.float64)
+    probs = (p_raw / p_raw.sum()).astype(np.float64)
+
+    bands = rng.choice(np.arange(7, dtype=np.uint8), size=batch_size, p=probs)
+    low  = lows[bands]
+    high = highs[bands]
+
+    # Log-uniform sampling within each band
+    u = rng.random(batch_size, dtype=np.float32)
+    d = np.exp(np.log(low) + u * (np.log(high) - np.log(low))).astype(np.float32)
+    return d, bands
+
+
 def _sample_distance_km(batch_size: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
     """
-    Piecewise log-uniform bands, favoring near-border points:
-    [0-10] km (60%), [10-50] (30%), [50-300] (10%).
+    Piecewise log-uniform bands favoring near-border points.
+
+    Bands (r = 0..6):
+      r0:  [0.01, 1)   km
+      r1:  [1,    5)   km
+      r2:  [5,    10)  km
+      r3:  [10,   25)  km
+      r4:  [25,   50)  km
+      r5:  [50,  150)  km 
+      r6:  [150,  500] km
+
+    Sampling probabilities (sum to 1 across these bands):
+      p ∝ {22, 18, 15, 8, 4, 2, 1}
+
+    Note: r255 ("uniform globe") is handled elsewhere and not sampled here.
     """
     bands = rng.choice([0, 1, 2], size=batch_size, p=[0.6, 0.3, 0.1])
     low  = np.array([0.1, 10.0, 50.0], dtype=np.float32)[bands]
@@ -519,6 +568,7 @@ def _label_and_write_chunk_with_full_tree(args):
             "y": xyz_chunk[:,1].astype(np.float32),
             "z": xyz_chunk[:,2].astype(np.float32),
             "dist_km": dist,
+            "log1p_dist": np.log1p(dist).astype(np.float32),
             "c1_id": c1,
             "c2_id": c2,
             "is_border": is_border_chunk.astype(np.uint8),
@@ -649,6 +699,7 @@ def _label_and_write_chunk(args):
             "y": xyz_chunk[:,1].astype(np.float32),
             "z": xyz_chunk[:,2].astype(np.float32),
             "dist_km": dist,
+            "log1p_dist": np.log1p(dist).astype(np.float32),
             "c1_id": c1,
             "c2_id": c2,
             "is_border": is_border_chunk.astype(np.uint8),
@@ -711,7 +762,7 @@ def make_dataset_parallel(
     knn_k: int = 128,
     knn_expand: int = 256,
     expand_rel: float = 1.05,
-    reliable: bool = False
+    reliable: bool = False # Use full tree for all points, not just the uniformly sampled points
 ) -> str:
     """
     Generate n_total samples and write ONE Parquet at `out_path`.
@@ -727,6 +778,7 @@ def make_dataset_parallel(
 
     # 1) Draw or load points (parent process only; no labeling here)
     if points_path is not None:
+        # TODO: make it work with log1p_dist
         t0 = time.perf_counter()
         (lon, lat, xyz, is_border, r_band, dkm_hint, ida, idb) = _load_points_parquet(points_path)
         print(f"Loaded starting points from '{points_path}' in {time.perf_counter() - t0:.3f}s")
@@ -872,7 +924,6 @@ def query_point(
 ):
     """
     Print the labeling result for a single (lon, lat).
-    Usage (CLI): python clean_geodata.py --lon -56.32122 --lat 47.07616
     """
     bs = BorderSampler(
         gpkg_path=gpkg_path,
@@ -891,8 +942,8 @@ def run():
 
     t0 = time.perf_counter()
     path = make_dataset_parallel(
-        n_total=100_000,
-        out_path=os.path.join(FOLDER_PATH, "parquet/dataset_100k.parquet"),
+        n_total=10_000_000,
+        out_path=os.path.join(FOLDER_PATH, "parquet/log_dataset_10M.parquet"),
         mixture=(0.70, 0.30),
         shards_per_total=32,
         max_workers=None,

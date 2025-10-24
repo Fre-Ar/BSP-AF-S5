@@ -10,6 +10,8 @@ nn_checkpoints/
 *.pt
 *.json
 *.DS_Store
+countries/
+raster/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

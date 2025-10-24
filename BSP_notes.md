@@ -72,3 +72,10 @@ Adreyy Carpati
 ## Notes
 
 AFTER: think about self evolving architectures: autosmth
+
+
+Check out this paper:
+https://proceedings.neurips.cc/paper_files/paper/2022/file/1165af8b913fb836c6280b42d6e0084f-Paper-Conference.pdf
+
+
+Notes: stopped at France (reunion) in color re-assignment.
