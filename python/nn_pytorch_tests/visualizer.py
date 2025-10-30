@@ -25,11 +25,19 @@ def plot_parquet_points(parquet_path, lon_col='lon', lat_col='lat',
     plt.xlim(-180, 180); plt.ylim(-90, 90)
     plt.tight_layout(); plt.show()
 
-def _resolve_world_layer():
+def _resolve_world_layer(use_cartopy: bool = False):
     """
     Try to get a Natural Earth world layer via the 'geodatasets' package.
     Returns a path or None if unavailable.
     """
+    if use_cartopy:
+        try:
+            import cartopy.io.shapereader as shp
+            return shp.natural_earth(resolution='110m',
+                                           category='cultural',
+                                           name='admin_0_countries')
+        except Exception:
+            pass
     try:
         from geodatasets import get_path
         # Try a few plausible keys; first one that works wins.
@@ -42,6 +50,7 @@ def _resolve_world_layer():
             try:
                 return get_path(key)
             except Exception:
+                #print(f"[WARN] path {key} don't work.")
                 pass
     except Exception:
         pass

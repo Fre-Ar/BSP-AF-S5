@@ -2,6 +2,7 @@
 
 from nn_siren import SIRENLayer, Sine
 from nn_relu import ReLULayer
+from nn_incode import INCODE_NIR
 from fourier_features import PositionalEncoding
 from nir import NIRLayer, NIRTrunk, MultiHeadNIR, ClassHeadConfig
 import torch, torch.nn as nn, torch.nn.functional as F
@@ -17,6 +18,7 @@ from time import perf_counter
 
 def main(parquet_path, codes_path="python/geodata/countries.ecoc.json",
          batch_size=8192, epochs=10,
+         model_name: str = "siren",
          layer_counts=(256,)*5, w0=30.0, w_hidden=1.0,
          lr=9e-4, loss_weights=(1.0,1.0,1.0),
          n_bits=BIT_LENGTH,
@@ -24,32 +26,47 @@ def main(parquet_path, codes_path="python/geodata/countries.ecoc.json",
          country_n: int = 289,
          device: str | None = None,
          debug_losses: bool = False,
-         head_layers: tuple = ()):
+         head_layers: tuple = (),
+         regularize_hyperparams: bool = False,
+         global_z: bool = True):
 
     print(f"Training on device: {device}")
     
     # Model
     depth = len(layer_counts)
-    model = MultiHeadNIR(SIRENLayer,
-                         in_dim=3,
-                         layer_counts=layer_counts,
-                         params=((w0,),)+((w_hidden,),)*(depth-1),
-                         class_cfg = ClassHeadConfig(class_mode=label_mode,
-                                                     n_bits=n_bits,
-                                                     n_classes_c1=country_n,
-                                                     n_classes_c2=country_n)
-                         ,head_layers=head_layers
-                         #,head_activation=Sine(w_hidden)
-                         ).to(device)
-    '''model = MultiHeadNIR(ReLULayer,
-                        in_dim=3,
-                        layer_counts=layer_counts,
-                        params=((),)+((),)*(depth-1),
-                        class_cfg = ClassHeadConfig(class_mode=label_mode,
-                                                    n_bits=n_bits,
-                                                    n_classes_c1=country_n,
-                                                    n_classes_c2=country_n)
-                        ).to(device)'''
+    if model_name.lower() == "siren":
+        model = MultiHeadNIR(SIRENLayer,
+                            in_dim=3,
+                            layer_counts=layer_counts,
+                            params=((w0,),)+((w_hidden,),)*(depth-1),
+                            class_cfg = ClassHeadConfig(class_mode=label_mode,
+                                                        n_bits=n_bits,
+                                                        n_classes_c1=country_n,
+                                                        n_classes_c2=country_n)
+                            ,head_layers=head_layers
+                            #,head_activation=Sine(w_hidden)
+                            ).to(device)
+    elif model_name.lower() == "relu":
+        model = MultiHeadNIR(ReLULayer,
+                            in_dim=3,
+                            layer_counts=layer_counts,
+                            params=None,
+                            class_cfg = ClassHeadConfig(class_mode=label_mode,
+                                                        n_bits=n_bits,
+                                                        n_classes_c1=country_n,
+                                                        n_classes_c2=country_n)
+                            ).to(device)
+    elif model_name.lower() == "incode":
+        model = INCODE_NIR(in_dim=3,
+                            layer_counts=layer_counts,
+                            w0=w0,
+                            w_hidden=w_hidden,
+                            class_cfg = ClassHeadConfig(class_mode=label_mode,
+                                                        n_bits=n_bits,
+                                                        n_classes_c1=country_n,
+                                                        n_classes_c2=country_n),
+                            learn_global_z = global_z
+                            ).to(device)
     uw = UncertaintyWeighting().to(device)
     uw = None
     
@@ -119,7 +136,9 @@ def main(parquet_path, codes_path="python/geodata/countries.ecoc.json",
             pos_weight_c2=pw_c2,
             label_mode=class_cfg.class_mode,
             uw=uw,
-            debug_losses=debug_losses)
+            debug_losses=debug_losses,
+            model_name=model_name,
+            regularize_hyperparams=regularize_hyperparams)
         va = evaluate(
             model, val_loader, device, lw,
             pos_weight_c1=pw_c1,
@@ -150,7 +169,9 @@ def main(parquet_path, codes_path="python/geodata/countries.ecoc.json",
             out_path = pathlib.Path("python/nn_checkpoints")
             out_path.mkdir(parents=True, exist_ok=True)
             
-            save_path = out_path / f"siren_{label_mode}_1M_{depth}x{layer_counts[0]}_{len(head_layers)}h_w{w0}_post.pt"
+            reg = "reg" if regularize_hyperparams else ""
+            tiling = "global_z" if global_z else "tiled"
+            save_path = out_path / f"{model_name}_{label_mode}_1M_{depth}x{layer_counts[0]}_wh{w_hidden}_{reg}_{tiling}.pt"
             torch.save(ckpt, save_path)
             print(f"  ↳ saved checkpoint: {save_path}")
 
@@ -174,12 +195,15 @@ if __name__ == "__main__":
     
     # weights found by finding the practical max of each loss
     main(PATH, epochs=20, device=device, label_mode="ecoc",
-         layer_counts=(128,)*15
+         model_name="incode",
+         layer_counts=(256,)*5
          #,loss_weights=(dist_w, c1_w, c2_w)
          ,w0=30.0
+         ,w_hidden=1.0
          #,debug_losses = True
          #,head_layers=(128,)
-         )
+         ,regularize_hyperparams=True,
+         global_z = True)
 
 
     

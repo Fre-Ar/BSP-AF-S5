@@ -12,6 +12,7 @@ shapely
 geopandas
 pyogrio
 geodatasets
+cartopy
 
 # Nice-to-have / used in code
 tqdm>=4.65

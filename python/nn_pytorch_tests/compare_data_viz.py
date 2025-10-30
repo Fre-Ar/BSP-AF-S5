@@ -6,12 +6,33 @@ from torch.utils.data import DataLoader
 from visualizer import plot_geopandas, overrides as new_hash
 from nn_siren import SIRENLayer, SIREN
 from nn_relu import ReLULayer
+from nn_incode import INCODE_NIR
 from nir import NIRLayer, NIRTrunk, MultiHeadNIR, ClassHeadConfig
 from data import BordersParquet, LossWeights, train_one_epoch, evaluate, load_ecoc_codes
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import torch.nn.functional as F
 from stats import ecoc_prevalence_by_bit, pos_weight_from_prevalence
+
+# ---- Learnable params checking ----
+def summarize_abcd(a, b, c, d, label=""):
+    def s(t):
+        return dict(mean=float(t.mean()), std=float(t.std()),
+                    min=float(t.min()), max=float(t.max()))
+    print(f"[{label}] a={s(a)}")
+    print(f"[{label}] b={s(b)}")
+    print(f"[{label}] c={s(c)}")
+    print(f"[{label}] d={s(d)}")
+
+@torch.no_grad()
+def check_abcd(model, x_batch):
+    model.eval()
+    if x_batch.dim() == 1: x_batch = x_batch.unsqueeze(0)
+    dist, c1, c2, (a,b,c,d) = model(x_batch, return_abcd=True)
+    summarize_abcd(a, b, c, d, label=f"B={x_batch.size(0)}")
+    return a, b, c, d
+
+# ---- ECOC ----
 
 def codebook_to_bits_matrix(codebook: dict[int, np.ndarray], n_bits: int | None = None):
     """
@@ -85,6 +106,7 @@ def compare_parquet_and_model_ecoc(
     parquet_path: str,
     checkpoint_path: str,
     model_builder,                 # callable that rebuilds SAME arch as training
+    model_name: str,
     label_mode: str = "auto",
     codes_path: str| None = None,
     sample: int | None = 200_000,
@@ -137,7 +159,7 @@ def compare_parquet_and_model_ecoc(
         class_cfg = ClassHeadConfig(class_mode="softmax", n_classes_c1=n_c1, n_classes_c2=n_c2)
 
     # model
-    model = model_builder().to(device)
+    model = model_builder(model_name).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
     
@@ -164,6 +186,10 @@ def compare_parquet_and_model_ecoc(
             e = min(N, s + batch_size)
             u = torch.from_numpy(xyz[s:e]).to(device)
             
+            if model_name.lower() == 'incode':
+                if s == 0:
+                    a, b, c, d, = check_abcd(model, u)
+                
             d_hat, logits_c1, logits_c2 = model(u)
             d_hat = d_hat.squeeze(-1)
 
@@ -262,6 +288,8 @@ def compare_parquet_and_model_ecoc(
     print(f"[c1]       acc={c1_ok.mean():.4f}")
     print(f"[c2]       acc={c2_ok.mean():.4f}")
 
+    
+    
     return {
         "err_km": err_km,
         "c1_ok": c1_ok,
@@ -273,35 +301,50 @@ def compare_parquet_and_model_ecoc(
 
 mode = "ecoc" 
     
-DEPTH = 15
-LAYER = 128
-w0 = 60.0  
+DEPTH = 5
+LAYER = 256
+w0 = 30.0 
+w_h = 1.0
+global_z = True
+regularize_hyperparams = True
     
-def build_model_for_eval():
+def build_model_for_eval(model_name="relu"):
     layer_counts = (LAYER,)*DEPTH
     cfg = ClassHeadConfig(class_mode=mode,
                         n_bits=32,
                         n_classes_c1=289,
                         n_classes_c2=289)
-    w_h = 1.0
-    model = MultiHeadNIR(
-        SIRENLayer,
-        in_dim=3,
-        layer_counts=layer_counts,
-        params=((w0,),)+((w_h,),)*(DEPTH-1),
-        class_cfg = cfg
-        #,head_layers=(LAYER,)
-        )
-    '''model = MultiHeadNIR(
-        ReLULayer,
-        in_dim=3,
-        layer_counts=layer_counts,
-        params=((),)+((),)*(depth-1),
-        class_cfg = cfg)'''
+    if model_name.lower() == "siren":
+        model = MultiHeadNIR(
+            SIRENLayer,
+            in_dim=3,
+            layer_counts=layer_counts,
+            params=((w0,),)+((w_h,),)*(DEPTH-1),
+            class_cfg = cfg
+            #,head_layers=(LAYER,)
+            )
+    elif model_name.lower() == "relu":
+        model = MultiHeadNIR(
+            ReLULayer,
+            in_dim=3,
+            layer_counts=layer_counts,
+            params=None,
+            class_cfg = cfg)
+    elif model_name.lower() == "incode":
+        model = INCODE_NIR(
+            in_dim=3,
+            w0=w0,
+            w_hidden=w_h,
+            layer_counts=layer_counts,
+            class_cfg = cfg,
+            learn_global_z = global_z)
     return model
 
+model_name = "incode"
+reg = "reg" if regularize_hyperparams else ""
+tiling = "global_z" if global_z else "tiled"
 #model_path = f"python/nn_checkpoints/siren_{mode}_1M_{DEPTH}x{LAYER}_0h_w{w0}_bayes_thr_200e.pt"
-model_path = f"python/nn_checkpoints/siren_{mode}_1M_{DEPTH}x{LAYER}_0h_w{w0}_post.pt"
+model_path = f"python/nn_checkpoints/{model_name}_{mode}_1M_{DEPTH}x{LAYER}_wh{w_h}_{reg}_{tiling}.pt"
 
 def run():
     compare_parquet_and_model_ecoc(
@@ -309,9 +352,10 @@ def run():
         checkpoint_path=model_path,
         codes_path="python/geodata/countries.ecoc.json",
         model_builder=build_model_for_eval,
+        model_name = model_name,
         sample=1_000_000,
         model_outputs_log1p = True
-        ,predictions_only=True
+        #,predictions_only=True
         ,overrides=new_hash
         , use_bayes_thr = False
     )

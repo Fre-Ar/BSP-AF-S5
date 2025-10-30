@@ -5,12 +5,13 @@ import torch.nn as nn
 from nir import NIRLayer
 
 class Gauss(nn.Module):
-    def __init__(self, s=1.0): 
+    """φ(z) = exp( - |s0 * z|^2 ), s0>0 fixed."""
+    def __init__(self, s: float = 1.0): 
         super().__init__()
         self.s = s
-    def forward(self, x): 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.exp(- (self.s * x) * (self.s * x))
-
+    
 class GAUSSLayer(NIRLayer):
     """
     Gauss Function (Ramasinghe & Lucey, 2022):

@@ -36,10 +36,10 @@ def neuron_counter(in_dim = 3, layer_counts: tuple = (256,)*5, head_counts = (),
         total += 3*(head_counts[i-1]+1) * head_counts[i]
     total += head_counts[-1] * (d_out + c1_out + c2_out)
     
-    return f"n: {total} | {round(total*0.00004, 2)} mb" 
+    return f"n: {total} | {round(total*0.000004, 2)} mb" 
 
-width = 64
+width = 256
 print(neuron_counter(
-    layer_counts=(width,)*54
+    layer_counts=(width,)*5
     #, head_counts=(width,)
     ))

@@ -12,6 +12,7 @@ import pandas as pd, numpy as np
 from tqdm import tqdm
 import json
 from loss import UncertaintyWeighting
+from nn_incode import INCODE_NIR as Incode
 
 # ===================== ECOC =====================
 
@@ -295,7 +296,9 @@ def train_one_epoch(model: nn.Module,
                     pos_weight_c2: Tensor | None = None,
                     label_mode: LabelMode = "ecoc",
                     uw: UncertaintyWeighting | None = None,
-                    debug_losses: bool = False) -> dict:
+                    debug_losses: bool = False,
+                    model_name: str = "siren",
+                    regularize_hyperparams: bool = False) -> dict:
     """
     Trains for one epoch on batches containing:
       xyz -> model -> (pred_log1p_dist, c1_logits, c2_logits)
@@ -342,8 +345,11 @@ def train_one_epoch(model: nn.Module,
         # TODO: MAKE r_band MATTER
 
         optimizer.zero_grad(set_to_none=True)
-
-        pred_log1p_dist, c1_logits, c2_logits = model(xyz)  # (B,1), (B,32), (B,32)
+        
+        if model_name.lower() == "incode":
+            pred_log1p_dist, c1_logits, c2_logits, (a,b,c,d) = model(xyz, regularize_hyperparams)  # (B,1), (B,32), (B,32)
+        else:
+            pred_log1p_dist, c1_logits, c2_logits = model(xyz)  # (B,1), (B,32), (B,32)
         # Distance regression
         loss_dist = mse(pred_log1p_dist, log1p_dist)
         
@@ -384,6 +390,8 @@ def train_one_epoch(model: nn.Module,
             loss = uw([lw.w_dist * loss_dist, lw.w_c1 * loss_c1, lw.w_c2 * loss_c2])
         else:
             loss = lw.w_dist * loss_dist + lw.w_c1 * loss_c1 + lw.w_c2 * loss_c2
+        if model_name.lower() == "incode" and regularize_hyperparams:
+            loss += Incode.incode_reg(a,b,c,d)
         loss.backward()
         
         optimizer.step()
@@ -485,7 +493,7 @@ def evaluate(model: nn.Module,
             xyz     = batch["xyz"].to(device)
             log1p_dist    = batch["log1p_dist"].to(device)
 
-            pred_log1p_dist, c1_logits, c2_logits = model(xyz)
+            pred_log1p_dist, c1_logits, c2_logits = model(xyz)  # (B,1), (B,32), (B,32)
             
             B = xyz.shape[0]
             # Distance Regression
