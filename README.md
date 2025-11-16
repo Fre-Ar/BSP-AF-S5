@@ -20,6 +20,7 @@ mapshaper \
 Ps. you can run even 1%
 5) run python/geodata/simplify_geodata.py 
 
-
+## Notes
+The `src/geodata/viz` is defunct and to be removed later on.
 
 

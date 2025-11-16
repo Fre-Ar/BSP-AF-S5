@@ -79,3 +79,15 @@ https://proceedings.neurips.cc/paper_files/paper/2022/file/1165af8b913fb836c6280
 
 
 Notes: stopped at France (reunion) in color re-assignment.
+Refactor notes:
+  - refactored everything in geodata except the 2 files in viz (likely to be deleted).
+  - refactored utils.
+  - fix the layer making (depth-1 to depth) for incode and other architectures that don't use NIRLayer.
+
+
+
+
+
+### Ideas and Principles
+- §Spectral Bias§: The tendency of Deep NNs to fit target functions from low to high frequency during training.
+    -> Solution: Design DNNs that can quickly learn high-frequency functions.
