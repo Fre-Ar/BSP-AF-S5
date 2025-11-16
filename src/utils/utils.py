@@ -4,6 +4,7 @@ import pandas as pd
 import os
 import json
 import pyarrow as pa, pyarrow.parquet as pq
+import torch
 
 # --------------------------- math -------------------------
 
@@ -89,6 +90,11 @@ def _concat_parquet_shards(
             writer.close()
             
 # ---------------------------- I/O --------------------------------
+
+def get_default_device() -> str:
+    if torch.accelerator.is_available():
+        return torch.accelerator.current_accelerator().type
+    return "cpu"
 
 def write_json(out: str, dictionary: dict, name = ""):
     """

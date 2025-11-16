@@ -186,14 +186,15 @@ def plot_parquet_points(
         Optional numeric column used to color the points.
     """
     # construct df and its columns
-    cols = [lon_col, lat_col]
-    if color_by:
-        cols.append(color_by)
-
-    df = pd.read_parquet(parquet_path, columns=cols)
-    if sample and len(df) > sample:
-        df = df.sample(sample, random_state=0)
-        
+    df = _prep_dataframe(
+        parquet_path=parquet_path,
+        lon=lon_col,
+        lat=lat_col,
+        color_by=color_by,
+        sample=sample,
+        extra_cols=(),
+    )
+    
     # plot
     plt.figure(figsize=figsize)
     if color_by:

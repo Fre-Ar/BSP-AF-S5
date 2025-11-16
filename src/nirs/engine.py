@@ -3,6 +3,7 @@
 from __future__ import annotations
 from typing import Tuple
 
+import torch
 from torch.utils.data import DataLoader
 
 from geodata.ecoc.ecoc import (
@@ -12,6 +13,8 @@ from geodata.ecoc.ecoc import (
 )
 from nirs.nns.nir import ClassHeadConfig, LabelMode
 from nirs.training import BordersParquet
+from nirs.create_nirs import build_model
+from utils.utils import get_default_device
 
 def make_dataloaders(
     parquet_path: str,
@@ -105,3 +108,45 @@ def compute_potential_ecoc_pos_weights(
         pw_c1 = pw_c2 = None
 
     return pw_c1, pw_c2
+
+def load_model_and_codebook(
+    checkpoint_path: str,
+    model_name: str,
+    layer_counts,
+    w0: float,
+    w_hidden: float,
+    s_param: float,
+    beta: float,
+    global_z: bool,
+    label_mode: LabelMode = "ecoc",
+    codes_path: str | None = None,
+    device:  str | None  = None,
+):
+    # resolve device
+    device = device if device else device = get_default_device()
+    
+    # ---- load checkpoint & config ----
+    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    cfg = ckpt.get("config", {})
+
+    if label_mode not in {"ecoc", "softmax"}:
+        raise ValueError(f"label_mode must be 'auto'|'ecoc'|'softmax', got {label_mode}")
+
+    # ---- build & load model ----
+    model, _ = build_model(
+        model_name,
+        layer_counts,
+        label_mode,
+        (w0, w_hidden, s_param, beta, global_z),
+    )
+    model.to(device)
+    model.load_state_dict(ckpt["model"])
+    model.eval()
+
+    codebook = None
+    if label_mode == "ecoc":
+        if codes_path is None:
+            raise ValueError("ECOC mode requires codes_path to the ECOC JSON codebook.")
+        codebook = load_ecoc_codes(codes_path)
+
+    return model, device, codebook, ckpt

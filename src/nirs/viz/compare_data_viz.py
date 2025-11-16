@@ -13,14 +13,17 @@ import geopandas as gpd
 import torch.nn.functional as F
 
 # --- Our module ---
-from .visualizer import plot_geopandas
+from .visualizer import plot_geopandas, _prep_dataframe
 from nirs.create_nirs import build_model
 from geodata.ecoc.ecoc import (
     load_ecoc_codes,
     ecoc_decode
 )
 
-from nirs.engine import compute_potential_ecoc_pos_weights
+from nirs.engine import (
+    compute_potential_ecoc_pos_weights,
+    load_model_and_codebook,
+    LabelMode)
 
 
 # -------------------------------------------------------------------
@@ -178,7 +181,7 @@ def _run_model_on_parquet(
     global_z: bool,
     regularize_hyperparams: bool,
     
-    label_mode: str = "auto",
+    label_mode: LabelMode = "ecoc",
     codes_path: str | None = None,
     sample: int | None = 200_000,
     batch_size: int = 131_072,
@@ -194,8 +197,28 @@ def _run_model_on_parquet(
     - Normalizes xyz to unit vectors.
     - If ECOC, uses soft ECOC decoding consistent with training pos_weight.
     """
-    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+    # load model and codebook from checkpoint
+    model, device, codebook, ckpt = load_model_and_codebook(
+        checkpoint_path=checkpoint_path,
+        model_name=model_name,
+        layer_counts=layer_counts,
+        
+        w0=w0,
+        w_hidden=w_h,
+        s_param=s_param,
+        beta=beta,
+        global_z=global_z,
+        
+        label_mode=label_mode,
+        codes_path=codes_path,
+        device=device)
 
+    pw_c1, pw_c2 = compute_potential_ecoc_pos_weights(
+        parquet_path=parquet_path,
+        codebook=codebook,
+        label_mode=label_mode)
+    
+        
     # ---- load subset of columns from parquet ----
     cols = ["lon", "lat", "x", "y", "z", "dist_km", "log1p_dist", "c1_id", "c2_id"]
     df = pd.read_parquet(parquet_path, columns=cols)
@@ -207,41 +230,6 @@ def _run_model_on_parquet(
     nrm = np.linalg.norm(xyz, axis=1, keepdims=True)
     xyz = (xyz / np.clip(nrm, 1e-9, None)).astype(np.float32)
 
-    # ---- load checkpoint & config ----
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
-    cfg = ckpt.get("config", {})
-
-    # decide on label mode
-    lm = label_mode
-    if lm == "auto":
-        lm = cfg.get("label_mode", "ecoc")
-    if lm not in {"ecoc", "softmax"}:
-        raise ValueError(f"label_mode must be 'auto'|'ecoc'|'softmax', got {lm}")
-
-    # ---- build & load model ----
-    model, _ = build_model(
-        model_name,
-        layer_counts,
-        lm,   # label_mode to pick head type
-        (w0, w_h, s_param, beta, global_z),
-    )
-    model.to(device)
-    model.load_state_dict(ckpt["model"])
-    model.eval()
-
-    # ---- ECOC setup (if needed) ----
-    
-    if lm == "ecoc":
-        if codes_path is None:
-            raise ValueError("ECOC mode requires codes_path to the ECOC JSON codebook.")
-        codebook = load_ecoc_codes(codes_path)
-    else:
-        codebook = None
-    
-    pw_c1, pw_c2 = compute_potential_ecoc_pos_weights(
-        parquet_path=parquet_path,
-        codebook=codebook,
-        label_mode=lm)
 
     # ---- batched inference ----
     N = xyz.shape[0]
@@ -265,7 +253,7 @@ def _run_model_on_parquet(
         else:
             d_km = d_hat  # already in km
 
-        if lm == "ecoc":
+        if label_mode == "ecoc":
             # Use shared ecoc_decode (soft mode) consistent with pos_weight
             c1_idx_pred = ecoc_decode(logits_c1, codebook, pos_weight=pw_c1, mode="soft")
             c2_idx_pred = ecoc_decode(logits_c2, codebook, pos_weight=pw_c2, mode="soft")
@@ -361,30 +349,19 @@ def compare_parquet_and_model_ecoc(
             clip_quantiles=(0.01, 0.99),
             figsize=(11, 5),
         )
-
-        # (B) predicted c1 (hashed colors)
-        _plot_derived_field(
-            df,
-            pred_c1,
-            "pred_c1",
-            color_mode="hashed",
-            log_scale=False,
-            markersize=3,
-            overrides=overrides,
-            figsize=(11, 5),
-        )
-
-        # (C) predicted c2 (hashed colors)
-        _plot_derived_field(
-            df,
-            pred_c2,
-            "pred_c2",
-            color_mode="hashed",
-            log_scale=False,
-            markersize=3,
-            overrides=overrides,
-            figsize=(11, 5),
-        )
+        
+        # (B) and (C) predicted c1 and c2 (hashed colors)
+        for name, arr in [("pred_c1", pred_c1), ("pred_c2", pred_c2)]:
+            _plot_derived_field(
+                df,
+                arr,
+                name,
+                color_mode="hashed",
+                log_scale=False,
+                markersize=3,
+                overrides=overrides,
+                figsize=(11, 5),
+            )
 
         return {
             "pred_dist": pred_dist,

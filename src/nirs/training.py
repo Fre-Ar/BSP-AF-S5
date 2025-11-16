@@ -20,6 +20,7 @@ from .nns.nir import LabelMode
 from .create_nirs import build_model
 
 from geodata.ecoc.ecoc import per_bit_threshold, ecoc_decode
+from utils.utils import get_default_device
 from utils.utils_geo import (
     COUNTRIES_ECOC_PATH, 
     CHECKPOINT_PATH,
@@ -725,7 +726,7 @@ def train_and_eval(
     """
     Trains and evaluates a NIR architecture, saving the best out of all into a checkpoint.
     """
-    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+    device = get_default_device()
     print(f"Training on device: {device}")
 
     # ------------------ Model ------------------

@@ -15,6 +15,7 @@ from geodata.ecoc.ecoc import load_ecoc_codes, ecoc_decode
 from nirs.world_bank_country_colors import colors_important
 from nirs.create_nirs import build_model
 from nirs.viz.visualizer import _hash_colors  
+from nirs.engine import load_model_and_codebook
 
 from utils.utils_geo import (
     COUNTRIES_ECOC_PATH,
@@ -226,14 +227,6 @@ def rasterize_model_from_checkpoint(
     overrides: Dict[int, str] | None = None,  # ids -> hex / mpl color
     opacity: float = 0.95,
 ) -> Tuple[np.ndarray, dict]:
-    '''
-    Run the model over a lon/lat grid and return an RGBA image (H,W,4) + aux metadata.
-
-    - ECOC mode: soft, non-pos_weighted decoder (matches your 'soft' visualizer).
-      'codes_path' must point to the ECOC JSON codebook.
-    - Softmax mode: argmax over logits; you may pass 'overrides' to color indices->RGBA.
-    - 'overrides' signature: np.ndarray[int ids] -> np.ndarray[uint8 RGBA], same length.
-    '''
     """
     Runs a trained NIR checkpoint over a lon/lat grid and rasterize either:
       
@@ -248,8 +241,7 @@ def rasterize_model_from_checkpoint(
         Key understood by `build_model` (e.g., "siren", "split_siren", "incode").
     layer_counts, depth, layer, w0, w_h, s_param, beta, global_z, regularize_hyperparams
         Hyperparameters passed through to `build_model`.
-    label_mode : {"auto", "ecoc", "softmax"}
-        - "auto": infer from checkpoint config.
+    label_mode : {"ecoc", "softmax"}
         - "ecoc": use ECOC decoding with `codes_path`.
         - "softmax": treat class heads as softmax over class indices.
     codes_path : str, optional
@@ -282,38 +274,22 @@ def rasterize_model_from_checkpoint(
     aux : dict
         Metadata: bbox, resolution, effective label_mode, tau, etc.
     """
-    # device
-    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
-
-    # load checkpoint & config
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
-    cfg = ckpt.get("config", {})
-
-    # resolve label mode
-    lm = label_mode
-    if lm == "auto":
-        lm = cfg.get("label_mode", "ecoc")
-    if lm not in {"ecoc", "softmax"}:
-        raise ValueError(f"label_mode must be 'auto'|'ecoc'|'softmax', got {lm}")
-
-    # build model and load weights
-    model, _ = build_model(
-        model_name,
-        layer_counts,
-        lm,
-        (w0, w_h, s_param, beta, global_z),
-    )
-    model.to(device)
-    model.load_state_dict(ckpt["model"])
-    model.eval()
+    # load model and codebook from checkpoint
+    model, device, codebook, ckpt = load_model_and_codebook(
+        checkpoint_path=checkpoint_path,
+        model_name=model_name,
+        layer_counts=layer_counts,
+        
+        w0=w0,
+        w_hidden=w_h,
+        s_param=s_param,
+        beta=beta,
+        global_z=global_z,
+        
+        label_mode=label_mode,
+        codes_path=codes_path,
+        device=device)
     
-    # ECOC bits (if needed)
-    codebook: Dict[int, np.ndarray] | None = None
-    if lm == "ecoc":
-        if codes_path is None:
-            raise ValueError("ECOC mode requires codes_path to the ECOC JSON codebook.")
-        codebook = load_ecoc_codes(codes_path)
-
     # build lon/lat grid and unit vectors
     lon2d, lat2d = make_lonlat_grid(
         lon_min=lon_min, lon_max=lon_max,
@@ -353,7 +329,7 @@ def rasterize_model_from_checkpoint(
                 continue
 
             # --- classification rendering (c1 / c2) ---
-            if lm == "ecoc":
+            if label_mode == "ecoc":
                 # temperature scaling: logits / tau
                 if render == "c1":
                     logits = logits_c1 / max(1e-6, float(tau))
@@ -388,7 +364,7 @@ def rasterize_model_from_checkpoint(
         lat_min=lat_min, lat_max=lat_max,
         width=width,     height=height,
         render=render,
-        label_mode=lm,
+        label_mode=label_mode,
         tau=tau,
     )
     return img, aux
