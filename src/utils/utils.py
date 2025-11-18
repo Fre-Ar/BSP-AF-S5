@@ -92,6 +92,8 @@ def _concat_parquet_shards(
 # ---------------------------- I/O --------------------------------
 
 def get_default_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
     if torch.accelerator.is_available():
         return torch.accelerator.current_accelerator().type
     return "cpu"

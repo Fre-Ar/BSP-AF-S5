@@ -27,6 +27,7 @@ def build_fourier_basis(
     Returns:
       B: (M, in_dim) fixed (register as buffer).
     '''
+    # TODO: change device here
     device = device if device is not None else torch.device("cpu")
     dtype = dtype if dtype is not None else torch.get_default_dtype()
 
