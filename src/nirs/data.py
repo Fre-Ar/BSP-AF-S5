@@ -207,15 +207,17 @@ def make_dataloaders(
         train_ds,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0,
-        pin_memory=False,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0,
-        pin_memory=False,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True
     )
     return train_loader, val_loader, class_cfg, codebook
 

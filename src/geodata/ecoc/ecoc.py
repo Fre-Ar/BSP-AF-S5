@@ -525,7 +525,7 @@ def per_bit_threshold(
     if pos_weight is None:
         return torch.full((n_bits,), 0.5, device=device)
     
-    pw = pos_weight.to(device=device, dtype=torch.float32)
+    pw = pos_weight.to(device=device, dtype=torch.float32, non_blocking=True)
     if pw.numel() == 1:
         pw = pw.expand(n_bits)
     return 1.0 / (1.0 + pw) # elementwise

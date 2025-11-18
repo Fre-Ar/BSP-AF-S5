@@ -22,12 +22,18 @@ GLOBAL_Z = True
 REG_HYPER = True
 
 def train():
+    """
+    On MPS:
+        20 epochs -> 150s (99s if plugged in)
+    """
     PATH = os.path.join(TRAINING_DATA_PATH, "eval_uniform_1M.parquet")
     
     t0 = time.perf_counter()
     train_and_eval(
         PATH,
-        epochs=100,
+        epochs=20,
+        batch_size = 8192,
+       
         
         model_name=MODEL,
         layer_counts=LAYER_COUNTS,
@@ -87,6 +93,6 @@ def img():
     print(f"Total rasterization time Elapsed: {dt:.3f}s")
     
 if __name__ == "__main__":
-    #train()
+    train()
     #viz()
-    img()
+    #img()

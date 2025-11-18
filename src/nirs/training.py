@@ -159,8 +159,8 @@ def _update_ecoc_metrics(
       - bit-level accuracy (c1_bit_acc / c2_bit_acc),
       - decoded top-1 accuracy if codebook + class indices are available.
     """
-    c1_bits = batch["c1_bits"].to(device)
-    c2_bits = batch["c2_bits"].to(device)
+    c1_bits = batch["c1_bits"].to(device, non_blocking=True)
+    c2_bits = batch["c2_bits"].to(device, non_blocking=True)
 
     # Per-bit thresholds consistent with BCE pos_weight
     thr1 = per_bit_threshold(pos_weight_c1, device, c1_bits.size(1))
@@ -182,8 +182,8 @@ def _update_ecoc_metrics(
         c2_idx_true = batch.get("c2_idx")
         if c1_idx_true is not None and c2_idx_true is not None:
             
-            c1_idx_true = c1_idx_true.to(device)
-            c2_idx_true = c2_idx_true.to(device)
+            c1_idx_true = c1_idx_true.to(device, non_blocking=True)
+            c2_idx_true = c2_idx_true.to(device, non_blocking=True)
 
             c1_idx_pred = ecoc_decode(c1_logits, codebook, pos_weight=pos_weight_c1, mode="soft")
             c2_idx_pred = ecoc_decode(c2_logits, codebook, pos_weight=pos_weight_c2, mode="soft")
@@ -201,8 +201,8 @@ def _update_softmax_metrics(
     """
     Updates softmax-based top-1 accuracy metrics.
     """
-    c1_idx = batch["c1_idx"].to(device)
-    c2_idx = batch["c2_idx"].to(device)
+    c1_idx = batch["c1_idx"].to(device, non_blocking=True)
+    c2_idx = batch["c2_idx"].to(device, non_blocking=True)
 
     c1_top1 = c1_logits.argmax(dim=1).eq(c1_idx).float().sum().item()
     c2_top1 = c2_logits.argmax(dim=1).eq(c2_idx).float().sum().item()
@@ -314,8 +314,8 @@ def train_one_epoch(
     pbar = tqdm(loader, leave=False) # progress bar
     for batch in pbar:
         # 2.1) Gradient Descent
-        xyz       = batch["xyz"].to(device)           # (B,3)
-        log1p_dist= batch["log1p_dist"].to(device)    # (B,1)
+        xyz       = batch["xyz"].to(device, non_blocking=True)           # (B,3)
+        log1p_dist= batch["log1p_dist"].to(device, non_blocking=True)    # (B,1)
         
         # TODO: MAKE r_band MATTER
 
@@ -360,33 +360,6 @@ def train_one_epoch(
         optimizer.step()
 
         # 2.2) Accumulate Stats
-        with torch.no_grad():
-            B = xyz.size(0)
-            totals["loss"] += float(loss.detach()) * B
-            totals["mse_sum_log"] += F.mse_loss(pred_log1p_dist.detach(), log1p_dist, reduction="sum").float()
-            totals["mse_sum"] += F.mse_loss(torch.expm1(pred_log1p_dist.detach()), torch.expm1(log1p_dist), reduction="sum").float()
-            totals["c1_loss"] += float(loss_c1.detach()) * B
-            totals["c2_loss"] += float(loss_c2.detach()) * B
-            totals["n"] += B
-            
-            # bit accuracies
-            #c1_pred_bits = (torch.sigmoid(c1_logits) >= 0.5).float()
-            #c2_pred_bits = (torch.sigmoid(c2_logits) >= 0.5).float()
-            #running["bits1"] += (c1_pred_bits.eq(c1_bits)).float().sum().item()
-            #running["bits2"] += (c2_pred_bits.eq(c2_bits)).float().sum().item()
-            
-            if debug_losses:
-                 # accumulate per-sample classification losses for quantiles (store on CPU)
-                c1_losses_epoch.append(c1_loss_vec.detach().cpu())
-                c2_losses_epoch.append(c2_loss_vec.detach().cpu())
-
-            pbar.set_postfix({
-                "rmse(km)": (totals["mse_sum"]/totals["n"])**0.5,
-                "rmse(log1p)": (totals["mse_sum_log"]/totals["n"])**0.5,
-                "c1_loss/n": totals["c1_loss"] / max(1, totals["n"]),
-                "c2_loss/n": totals["c2_loss"] / max(1, totals["n"]),
-            })
-            
         with torch.no_grad():
             # accumulate stats
             B = xyz.size(0)
@@ -441,6 +414,7 @@ def train_one_epoch(
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
+    model_name: str,
     loader: DataLoader,
     device: torch.device | str,
     lw: LossWeights,
@@ -495,12 +469,12 @@ def evaluate(
 
     with torch.no_grad():
         for batch in loader:
-            xyz     = batch["xyz"].to(device)
-            log1p_dist    = batch["log1p_dist"].to(device)
+            xyz     = batch["xyz"].to(device, non_blocking=True)
+            log1p_dist    = batch["log1p_dist"].to(device, non_blocking=True)
 
             # forward model
             pred_log1p_dist, c1_logits, c2_logits, _ = _forward_model(
-                model, xyz, model_name="siren", regularize_hyperparams=False
+                model, xyz, model_name=model_name, regularize_hyperparams=False
             )
             
             # Distance Regression
@@ -550,7 +524,7 @@ def train_and_eval(
     codes_path: str | None = COUNTRIES_ECOC_PATH,
     out_dir: str | os.PathLike = CHECKPOINT_PATH,
     
-    batch_size: int = 8192,
+    batch_size: int = 8192,#65536,
     epochs: int = 10,
     
     model_name: str = "siren",
@@ -644,6 +618,7 @@ def train_and_eval(
 
         va = evaluate(
             model=model,
+            model_name=model_name,
             loader=val_loader,
             device=device,
             lw=lw,

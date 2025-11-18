@@ -3,6 +3,7 @@
 ## Set up
 1) Create a python environment
 2) run `pip install -r requirements.txt`
+3) If using Windows with Cuda, make sure you install a cuda version of pytorch.
 
 ## Mapshaper set up
 1) run `conda install -c conda-forge nodejs`
