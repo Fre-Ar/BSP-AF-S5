@@ -11,7 +11,7 @@ from geodata.sampler.labeling import make_dataset_parallel
 
 
 from utils.utils_geo import COUNTRIES_ECOC_PATH, ADJACENCY_JSON_PATH, \
-    COUNTRIES_LAYER, ID_FIELD, GPKG_PATH, ECOC_BITS, SEED, BORDERS_FGB_PATH, FOLDER_PATH
+    COUNTRIES_LAYER, ID_FIELD, GPKG_PATH, ECOC_BITS, SEED, BORDERS_FGB_PATH, TRAINING_DATA_PATH
 from utils.utils import write_json, human_int
 
 # -----------------------------
@@ -46,25 +46,34 @@ def preprocess_borders():
 # -----------------------------
 
 def create_training_data():
-        # safety for multiprocessing
+    """
+    100% uniform:
+        100k points takes ~46s
+        1M   points takes ~220s
+        10M  points takes ~1600s or ~26 min
+    100% border:
+        100k points takes ~46s
+        1M   points takes ~148s
+        10M  points takes ~1160s or ~19 min
+    """
+    # safety for multiprocessing
     mp.set_start_method("spawn", force=True)
 
     t0 = time.perf_counter()
     n = 1_000_000
     path = make_dataset_parallel(
         n_total=n,
-        out_path=os.path.join(FOLDER_PATH, f"parquet/training_{human_int(n)}_.parquet"),
-        mixture=(0.70, 0.30),
+        out_path=os.path.join(TRAINING_DATA_PATH, f"training_{human_int(n)}.parquet"),
+        mixture=(0.86, 0.14),
         shards_per_total=32,
         max_workers=None,
         seed=None,
         knn_k=128,
         knn_expand=256,
-        expand_rel=1.05,
-        reliable=True
+        expand_rel=1.05
     )
     dt = time.perf_counter() - t0
     print(f"Total time Elapsed: {dt:.3f}s")
 
 if __name__ == "__main__":
-    pass
+    create_training_data()

@@ -1,85 +1,17 @@
 # src/nirs/engine.py
 
 from __future__ import annotations
-from typing import Tuple
 
 import torch
-from torch.utils.data import DataLoader
 
 from geodata.ecoc.ecoc import (
     load_ecoc_codes,
     ecoc_prevalence_by_bit,
     pos_weight_from_prevalence,
 )
-from nirs.nns.nir import ClassHeadConfig, LabelMode
-from nirs.training import BordersParquet
+from nirs.nns.nir import LabelMode
 from nirs.create_nirs import build_model
 from utils.utils import get_default_device
-
-def make_dataloaders(
-    parquet_path: str,
-    *,
-    label_mode: LabelMode,
-    codes_path: str | None,
-    split: Tuple[float, float] = (0.9, 0.1),
-    batch_size: int = 8192,
-    codebook: dict | None = None,
-):
-    """
-    Shared dataset + dataloader construction for training & eval.
-
-    - In ECOC mode, loads ECOC codebook (if not provided) and builds
-      BordersParquet with bit targets.
-    - In softmax mode, builds BordersParquet with integer targets.
-    """
-    if label_mode == "ecoc":
-        if codebook is None:
-            assert codes_path is not None, "codes_path is required for ECOC mode."
-            codebook = load_ecoc_codes(codes_path)
-    
-    # create the parquet wrapper objects
-    train_ds = BordersParquet(
-        parquet_path,
-        split="train",
-        split_frac=split,
-        codebook=codebook,
-        label_mode=label_mode)
-    
-    val_ds = BordersParquet(
-        parquet_path,
-        split="val",
-        split_frac=split,
-        codebook=codebook,
-        label_mode=label_mode)
-    
-    if label_mode == "ecoc":
-        bits = len(next(iter(codebook.values())))
-        class_cfg = ClassHeadConfig(
-            class_mode=label_mode,
-            n_bits=bits)
-    else:
-        class_cfg = ClassHeadConfig(
-            class_mode=label_mode,
-            n_classes_c1=train_ds.num_classes_c1,
-            n_classes_c2=train_ds.num_classes_c2)
-
-    # create the dataloaders
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=0,
-        pin_memory=False,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=False,
-    )
-    return train_loader, val_loader, class_cfg, codebook
-
 
 def compute_potential_ecoc_pos_weights(
     parquet_path: str,
@@ -123,7 +55,7 @@ def load_model_and_codebook(
     device:  str | None  = None,
 ):
     # resolve device
-    device = device if device else device = get_default_device()
+    device = device if device else get_default_device()
     
     # ---- load checkpoint & config ----
     ckpt = torch.load(checkpoint_path, map_location="cpu")

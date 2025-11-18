@@ -84,6 +84,16 @@ Refactor notes:
   - refactored utils.
   - fix the layer making (depth-1 to depth) for incode and other architectures that don't use NIRLayer.
 
+### Sampling
+- Nyquist–Shannon sampling theorem (spacing of data <= 1/(2*f_max) )
+- MLPs have an effective maximum spatial frequency they can reliably fit.
+
+Next steps to do:
+- create uniform 400k sample set
+- actually measure training times
+- extrapolate:
+  - for a given param budget and a given training time, how many points can we fit in there and what are the results?
+
 
 
 

@@ -3,15 +3,10 @@ import re
 import matplotlib.pyplot as plt
 from typing import List, Tuple
 
-from geodata.ecoc.ecoc import (
-  load_ecoc_codes,
-  ecoc_prevalence_by_bit, 
-  pos_weight_from_prevalence
-)
-
 def test():
   codes_path="python/geodata/countries.ecoc.json"
   PATH = "python/geodata/parquet/dataset_all.parquet"
+  '''
   codebook = load_ecoc_codes(codes_path)
 
   ones_c1, totals_c1, p1_c1 = ecoc_prevalence_by_bit(PATH, codebook, id_col="c1_id")
@@ -23,6 +18,7 @@ def test():
   print("c1: ", pw_c1)
   print("c2: ", pw_c2)
   print(codebook.get(289))
+  '''
 
   # Stats of dataset_all (rounded to .2):
   '''
@@ -331,9 +327,17 @@ def neuron_counter(in_dim = 3, layer_counts: tuple = (256,)*5, head_counts = (),
     
     return f"n: {total} | {round(total*0.000004, 2)} mb" 
 
-width = 256
-depth = 5
+width = 10
+depth = 2
 print(neuron_counter(
     layer_counts=(width,)*depth
     #, head_counts=(width,)
     ))
+
+'''
+496x 2 n: 280736 | 1.12 mb
+256x 5 n: 280832 | 1.12 mb
+192x 8 n: 272640 | 1.09 mb
+128x17 n: 273024 | 1.09 mb
+64 x66 n: 274816 | 1.1 mb
+'''

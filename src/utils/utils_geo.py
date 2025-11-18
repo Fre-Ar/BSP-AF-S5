@@ -30,7 +30,8 @@ COUNTRIES_ECOC_PATH = os.path.join(FOLDER_PATH, "countries.ecoc.json")
 
 # Training data + checkpoints
 TRAINING_DATA_PATH = "src/geodata/parquet"   
-CHECKPOINT_PATH = "src/checkpoints"       
+CHECKPOINT_PATH = "src/checkpoints"     
+DATA_ANALYSIS_PATH = "src/analysis"   
 
 # Dataset meta
 ECOC_BITS = 32

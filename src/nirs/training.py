@@ -1,17 +1,17 @@
 # src/nirs/training.py
 
 import math, pathlib
-import pandas as pd, numpy as np
+import numpy as np
 from tqdm import tqdm
-from typing import Dict, Optional, Tuple, Literal
+from typing import Dict, Optional
 from dataclasses import dataclass
 import os
 
 import torch
 import torch.nn.functional as F
-import torch.nn as nn, torch.optim as opt
+import torch.nn as nn
 from torch import Tensor
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 
 
 from .loss import UncertaintyWeighting
@@ -21,157 +21,10 @@ from .create_nirs import build_model
 
 from geodata.ecoc.ecoc import per_bit_threshold, ecoc_decode
 from utils.utils import get_default_device
-from utils.utils_geo import (
-    COUNTRIES_ECOC_PATH, 
-    CHECKPOINT_PATH,
-    SEED)
+from utils.utils_geo import COUNTRIES_ECOC_PATH, CHECKPOINT_PATH
 
-from .engine import (
-    make_dataloaders,
-    compute_potential_ecoc_pos_weights
-)
-
-# ===================== DATA =====================
-
-
-class BordersParquet(Dataset):
-    """
-    Parquet-backed dataset for training the spherical distance + country classification heads.
-
-    Expected Parquet columns:
-      - lon, lat          : geographic coordinates in degrees (unused at training time if dropped)
-      - x, y, z           : unit-vector coordinates on the sphere
-      - dist_km           : scalar geodesic distance to nearest border segment (km)
-      - log1p_dist        : log(1 + dist_km)
-      - c1_id, c2_id      : integer class IDs for the two “sides” of the nearest border
-      - is_border         : 1 if sampled via near-border process, 0 if uniform globe
-      - r_band            : distance band index (0..N for near-border, 255 for uniform)
-
-    Label modes
-    -----------
-    ECOC mode (label_mode="ecoc"):
-      - Requires `codebook: Dict[int, ndarray]` mapping class_id -> bit vector (0/1) of shape (n_bits,).
-      - __getitem__ returns:
-          {
-            "xyz":        FloatTensor (3,),
-            "dist":       FloatTensor (1,),        # km
-            "log1p_dist": FloatTensor (1,),
-            "r_band":     IntTensor (1,),
-            "c1_idx":     LongTensor (),           # raw class id
-            "c2_idx":     LongTensor (),
-            "c1_bits":    FloatTensor (n_bits,),
-            "c2_bits":    FloatTensor (n_bits,),
-          }
-
-    Softmax mode (label_mode="softmax"):
-      - Ignores `codebook`.
-      - __getitem__ returns the same keys minus "c1_bits"/"c2_bits".
-
-    Splitting
-    ---------
-    - Deterministic shuffle with `seed`.
-    - `split_frac = (train_frac, val_frac)` must sum to 1.
-    - `split="train"` → first train_frac of shuffled indices.
-      `split="val"`   → remaining indices.
-
-    Notes
-    -----
-    - All features/targets are preloaded into memory as tensors for fast __getitem__.
-      This is fine for up to ~10M rows on a modern machine; for larger datasets you
-      might want streaming / lazy loading.
-    """
-    def __init__(
-        self,
-        parquet_path: str | pathlib.Path,
-        
-        split: Literal["train", "val"] = "train",
-        split_frac: Tuple[float, float] = (0.9, 0.1),
-        
-        seed: int = SEED,
-        
-        codebook:  Optional[Dict[int, np.ndarray]] = None,
-        label_mode: LabelMode = "ecoc",
-        
-        drop_cols: Tuple[str, ...] = ("lon", "lat", "is_border")
-    ):
-        super().__init__()
-        assert abs(sum(split_frac) - 1.0) < 1e-6, "split_frac must sum to 1"
-        assert split in ("train", "val")
-
-        self.path = str(parquet_path)
-        self.label_mode = label_mode
-        # stored for reference; not used inside __getitem__.
-        self.codebook = codebook
-
-        # --- load dataframe (pyarrow backend can memory-map) ---
-        df = pd.read_parquet(self.path)
-
-        required = {"x", "y", "z", "dist_km", "log1p_dist", "c1_id", "c2_id", "r_band"}
-        missing = required.difference(df.columns)
-        if missing:
-            raise ValueError(f"Parquet is missing required columns: {sorted(missing)}")
-
-        # --- deterministic shuffle & split ---
-        rng = np.random.default_rng(seed)
-        idx = np.arange(len(df))
-        rng.shuffle(idx)
-        n = len(idx)
-        n_train = int(n * split_frac[0])
-        take = idx[:n_train] if split == "train" else idx[n_train:]
-        self.df = df.iloc[take].reset_index(drop=True)
-
-        # keep raw ids for softmax or ECOC lookup  
-        c1_id = self.df["c1_id"].to_numpy(np.int32, copy=False)
-        c2_id = self.df["c2_id"].to_numpy(np.int32, copy=False)
-        
-        # --- precompute tensors (fast __getitem__) ---
-        # coordinates and regression target
-        self.xyz = torch.from_numpy(self.df[["x","y","z"]].values).float()           # (N,3)
-        self.dist = torch.from_numpy(self.df["dist_km"].values).float().unsqueeze(1) # (N,1)
-        self.log1p_dist = torch.from_numpy(self.df["log1p_dist"].values).float().unsqueeze(1) # (N,1)
-        self.r_band = torch.from_numpy(self.df["r_band"].values).int().unsqueeze(1) # (N,1)
-        
-        # Pre-compute ECOC tensors if applicable
-        if label_mode == "ecoc":
-            if codebook is None:
-                raise ValueError("label_mode='ecoc' requires a codebook.")
-            c1_bits = np.stack([codebook[int(cid)] for cid in c1_id], axis=0).astype(np.float32)
-            c2_bits = np.stack([codebook[int(cid)] for cid in c2_id], axis=0).astype(np.float32)
-            self.c1_bits = torch.from_numpy(c1_bits)
-            self.c2_bits = torch.from_numpy(c2_bits)
-        else:
-            self.c1_bits = None
-            self.c2_bits = None
-            
-        # Drop unused columns to free memory
-        for c in drop_cols:
-            if c in self.df:
-                self.df = self.df.drop(columns=[c])
-        
-        # Class counts for softmax convenience (assume 0..max_id is dense
-        # TODO: fix softmax classes having no 0 index (and thus remove the +1 here).
-        self.num_classes_c1 = int(c1_id.max()) + 1
-        self.num_classes_c2 = int(c2_id.max()) + 1
-        
-        self.c1_id = torch.as_tensor(c1_id, dtype=torch.long)
-        self.c2_id = torch.as_tensor(c2_id, dtype=torch.long)
-
-    def __len__(self) -> int:
-        return self.xyz.shape[0]
-
-    def __getitem__(self, i: int) -> dict:
-        item = {
-            "xyz":       self.xyz[i],        # (3,)
-            "dist":      self.dist[i],       # (1,)
-            "log1p_dist":self.log1p_dist[i],       # (1,)
-            "r_band":    self.r_band[i],
-            "c1_idx":    self.c1_id[i],
-            "c2_idx":    self.c2_id[i],
-        }
-        if self.label_mode == "ecoc":
-            item["c1_bits"] = self.c1_bits[i]  # (n_bits,)
-            item["c2_bits"] = self.c2_bits[i]  # (n_bits,)
-        return item
+from .engine import compute_potential_ecoc_pos_weights
+from .data import make_dataloaders
 
 # ===================== INTERNAL HELPERS =====================
 
@@ -825,6 +678,7 @@ def train_and_eval(
                     "beta": beta,
                     "global_z": global_z,
                     "encoder_params": encoder_params,
+                    "epochs": epochs,
                 },
             }
             

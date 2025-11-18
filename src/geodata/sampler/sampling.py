@@ -23,18 +23,17 @@ from utils.utils_geo import (
 # --------------------------- sampling logic -------------------------
 
 # TODO: Choose better bands and probabilities
-def _sample_distance_km_test(batch_size: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+def _sample_distance_km(batch_size: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
     '''
     Piecewise log-uniform bands favoring near-border points.
 
-    Bands (r = 0..6):
+    Bands (r = 0..5):
       r0:  [0.01, 1)   km
       r1:  [1,    5)   km
       r2:  [5,    10)  km
       r3:  [10,   25)  km
       r4:  [25,   50)  km
-      r5:  [50,  150)  km 
-      r6:  [150,  500] km
+      r5:  [50,  150)  km
 
     Sampling probabilities (sum to 1 across these bands):
       p ∝ {22, 18, 15, 8, 4, 2, 1}  ->  [0.3142857, 0.2571429, 0.2142857, 0.1142857, 0.0571429, 0.0285714, 0.0142857]
@@ -42,13 +41,13 @@ def _sample_distance_km_test(batch_size: int, rng: np.random.Generator) -> tuple
     Note: r255 ("uniform globe") is handled elsewhere and not sampled here.
     '''
     # Bands low/high (km). Use a small >0 lower bound for r0 to avoid log(0).
-    lows  = np.array([0.01,  1.0,   5.0,   10.0,  25.0, 50.0, 150.0], dtype=np.float32)
-    highs = np.array([1.0,   5.0,  10.0,   25.0,  50.0, 150.0, 500.0], dtype=np.float32)
+    lows  = np.array([0.01,  1.0,   5.0,   10.0,  25.0, 50.0], dtype=np.float32)
+    highs = np.array([1.0,   5.0,  10.0,   25.0,  50.0, 150.0], dtype=np.float32)
     # Probabilities normalized from {22,18,15,8,4,2,1}
-    p_raw = np.array([22, 18, 15, 8, 4, 2, 1], dtype=np.float64)
+    p_raw = np.array([36, 36, 11, 9, 4, 4], dtype=np.float64)
     probs = (p_raw / p_raw.sum()).astype(np.float64)
 
-    bands = rng.choice(np.arange(7, dtype=np.uint8), size=batch_size, p=probs)
+    bands = rng.choice(np.arange(6, dtype=np.uint8), size=batch_size, p=probs)
     low  = lows[bands]
     high = highs[bands]
 
@@ -58,7 +57,7 @@ def _sample_distance_km_test(batch_size: int, rng: np.random.Generator) -> tuple
     return d, bands
 
 
-def _sample_distance_km(batch_size: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+def _sample_distance_km_old(batch_size: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
     '''
     Piecewise log-uniform bands favoring near-border points.
 
