@@ -665,4 +665,37 @@ def ecoc_decode(
     return pred_class_ids
 
 
+def _codebook_to_bits_matrix_local(codebook: Dict[int, np.ndarray], n_bits: int | None = None):
+    """
+    From {class_id: np.uint8[K]} build:
+      ids:  [C] int64 array of class ids (sorted ascending)
+      bits: [C,K] float tensor (0/1), where K = n_bits or inferred from entries.
+    """
+    ids = np.array(sorted(codebook.keys()), dtype=np.int64)
+    K_inf = int(next(iter(codebook.values())).shape[0])
+    K = int(n_bits if n_bits is not None else K_inf)
+    M = np.zeros((len(ids), K), dtype=np.uint8)
+    for i, cid in enumerate(ids):
+        v = codebook[cid]
+        if v.shape[0] < K:
+            raise ValueError(f"Code for class {cid} has length {v.shape[0]} < requested {K}")
+        M[i, :] = v[:K].astype(np.uint8)
+    bits = torch.from_numpy(M.astype(np.float32))
+    return ids, bits  # np.int64[C], torch.float32[C,K]
 
+@torch.no_grad()
+def _ecoc_decode_soft_old(
+    logits_bits: torch.Tensor,   # [B, K] pre-sigmoid
+    bits_codebook: torch.Tensor, # [C, K] in {0,1}
+    tau: float = 1.0
+) -> torch.Tensor:
+    """
+    Soft ECOC log-likelihood (no pos_weight shifts):
+      score(c) = sum_k [ b_ck * log σ(z_k/tau) + (1-b_ck) * log σ(-z_k/tau) ]
+    Returns indices in [0..C-1].
+    """
+    z = logits_bits / max(1e-6, float(tau))     # [B,K]
+    B = bits_codebook.float()                   # [C,K]
+    Z = z.unsqueeze(1)                          # [B,1,K]
+    score = B.unsqueeze(0) * F.logsigmoid(Z) + (1 - B).unsqueeze(0) * F.logsigmoid(-Z)  # [B,C,K]
+    return score.sum(dim=-1).argmax(dim=1)      # [B]

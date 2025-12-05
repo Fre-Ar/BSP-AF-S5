@@ -34,8 +34,8 @@ def build_siren(layer_counts, class_cfg, w0_first=30.0, w0_hidden=1.0):
 def build_incode(layer_counts, class_cfg, w0=30.0, w_hidden=1.0, learn_global_z=False):
     model = INCODE_NIR(
         in_dim=3,
-        w0=w0,
-        w_hidden=w_hidden,
+        w0_first=w0,
+        w0_hidden=w_hidden,
         layer_counts=layer_counts,
         class_cfg = class_cfg,
         learn_global_z = learn_global_z)
@@ -46,7 +46,7 @@ def build_gauss(layer_counts, class_cfg, s=1.0):
         GAUSSLayer,
         in_dim=3,
         layer_counts=layer_counts,
-        params=((s,),)*(len(layer_counts)-1),
+        params=((s,),)*(len(layer_counts)),
         class_cfg = class_cfg)
     return model
 
@@ -55,7 +55,7 @@ def build_hosc(layer_counts, class_cfg, beta=1.0):
         HOSCLayer,
         in_dim=3,
         layer_counts=layer_counts,
-        params=((beta,),)*(len(layer_counts)-1),
+        params=((beta,),)*(len(layer_counts)),
         class_cfg = class_cfg)
     return model
 
@@ -64,7 +64,7 @@ def build_sinc(layer_counts, class_cfg, w0):
         SINCLayer,
         in_dim=3,
         layer_counts=layer_counts,
-        params=((w0,),)*(len(layer_counts)-1),
+        params=((w0,),)*(len(layer_counts)),
         class_cfg = class_cfg)
     return model
 

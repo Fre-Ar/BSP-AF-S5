@@ -52,7 +52,7 @@ def load_model_and_codebook(
     global_z: bool,
     label_mode: LabelMode = "ecoc",
     codes_path: str | None = None,
-    device:  str | None  = None,
+    device:  str | None  = None
 ):
     # resolve device
     device = device if device else get_default_device()
@@ -60,7 +60,7 @@ def load_model_and_codebook(
     # ---- load checkpoint & config ----
     ckpt = torch.load(checkpoint_path, map_location="cpu")
     cfg = ckpt.get("config", {})
-
+    
     if label_mode not in {"ecoc", "softmax"}:
         raise ValueError(f"label_mode must be 'auto'|'ecoc'|'softmax', got {label_mode}")
 
@@ -80,5 +80,8 @@ def load_model_and_codebook(
         if codes_path is None:
             raise ValueError("ECOC mode requires codes_path to the ECOC JSON codebook.")
         codebook = load_ecoc_codes(codes_path)
+        
+    first_param = next(model.parameters()).detach().flatten()
 
+        
     return model, device, codebook, ckpt

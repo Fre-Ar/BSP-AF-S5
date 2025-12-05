@@ -44,7 +44,7 @@ SEED = 42 # global default seed
 # -----------------------------
 # Math helpers
 # -----------------------------
-def normalize_vec(v: np.ndarray):
+def normalize_vec(v: np.ndarray, axis=1):
     """
     Normalizes vectors to unit length, robustly.
 
@@ -58,7 +58,7 @@ def normalize_vec(v: np.ndarray):
     v_u : ndarray
         Unit vectors of the same shape, with safe handling of very small norms.
     """
-    return _safe_div(v, _safe_norm(v))
+    return _safe_div(v, _safe_norm(v, axis=axis))
 
 def lonlat_to_unitvec(lon_deg, lat_deg, dtype=np.float32) -> np.ndarray:
     """
@@ -85,7 +85,7 @@ def lonlat_to_unitvec(lon_deg, lat_deg, dtype=np.float32) -> np.ndarray:
     v = np.stack([cl * np.cos(lon),
                   cl * np.sin(lon),
                   np.sin(lat)], axis=-1)
-    v = normalize_vec(v)
+    v = normalize_vec(v, axis=-1)
 
     return v.astype(dtype)
 

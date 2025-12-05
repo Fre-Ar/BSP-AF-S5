@@ -353,8 +353,8 @@ def estimate_intrinsic_cutoff_on_s2(    # <<< CHANGED FOR S^2: renamed + S^2 sem
 def main() -> None:
     MODEL = "siren"
     MODE = "ecoc" 
-    DEPTH = 66
-    LAYER = 64
+    DEPTH = 12
+    LAYER = 128
     LAYER_COUNTS = (LAYER,)*DEPTH
 
     W0 = 30.0 

@@ -10,7 +10,7 @@ from PIL import Image
 import math
 
 
-from geodata.ecoc.ecoc import load_ecoc_codes, ecoc_decode
+from geodata.ecoc.ecoc import load_ecoc_codes, ecoc_decode, _ecoc_decode_soft_old, _codebook_to_bits_matrix_local
 
 from nirs.world_bank_country_colors import colors_important
 from nirs.create_nirs import build_model
@@ -21,7 +21,8 @@ from utils.utils_geo import (
     COUNTRIES_ECOC_PATH,
     CHECKPOINT_PATH,
     MERCATOR_LIMIT,
-    lonlat_to_unitvec)
+    lonlat_to_unitvec,
+    unitvec_to_lonlat)
 
 
 # ------------------------ utils ------------------------
@@ -290,6 +291,17 @@ def rasterize_model_from_checkpoint(
         codes_path=codes_path,
         device=device)
     
+    cfg = ckpt.get("config", {})
+    pw_c1, pw_c2 = cfg.get("pos_weight_c1", None), cfg.get("pos_weight_c2", None)
+    
+    # ---- ECOC bits (old-style) ----
+    ids_np: Optional[np.ndarray] = None
+    bits_t: Optional[torch.Tensor] = None
+    if label_mode == "ecoc":
+        n_bits = int(cfg.get("n_bits", 32))
+        ids_np, bits_t = _codebook_to_bits_matrix_local(codebook, n_bits=n_bits)
+        bits_t = bits_t.to(device)
+    
     # build lon/lat grid and unit vectors
     lon2d, lat2d = make_lonlat_grid(
         lon_min=lon_min, lon_max=lon_max,
@@ -302,15 +314,69 @@ def rasterize_model_from_checkpoint(
 
     out_rgba = np.zeros((N, 4), dtype=np.uint8)
 
+    debug = False
+    if debug:
+        # --- debug: probe a single point from the grid ---
+        debug_lon_val = lon_max
+        debug_lat_val = lat_min
+
+        # your lonlat_to_xyz / lonlat_to_unitvec only accepts np.ndarray
+        debug_lon = np.array([debug_lon_val], dtype=np.float32)
+        debug_lat = np.array([debug_lat_val], dtype=np.float32)
+
+        debug_xyz = lonlat_to_unitvec(debug_lon, debug_lat).astype(np.float32)  # shape (1,3)
+        print(debug_xyz)
+        point_dbg = np.array([0.0232, 0.0099, 0.0228], dtype=np.float32)
+        print("try", unitvec_to_lonlat(point_dbg))
+        #debug_xyz = np.array([0.0232, 0.0099, 0.0228], dtype=np.float32)
+        u_dbg = torch.from_numpy(debug_xyz).to(device)  # (1,3)
+        
+        with torch.no_grad():
+            d_hat_dbg, logits_c1_dbg, logits_c2_dbg = model(u_dbg)
+            d_hat_dbg = d_hat_dbg.squeeze(-1)
+
+            if label_mode == "ecoc":
+                # ECOC decode with pos_weight if available
+                if render == "c1":
+                    logits_dbg = logits_c1_dbg / max(1e-6, float(tau))
+                    pw_dbg = torch.tensor(pw_c1, dtype=torch.float32, device=device) if pw_c1 is not None else None
+                else:
+                    logits_dbg = logits_c2_dbg / max(1e-6, float(tau))
+                    pw_dbg = torch.tensor(pw_c2, dtype=torch.float32, device=device) if pw_c2 is not None else None
+                
+                
+                class_id_dbg = ecoc_decode(
+                    logits_dbg,
+                    codebook=codebook,
+                    pos_weight=pw_dbg,
+                    mode="soft",
+                )[0].item()
+            else:
+                # softmax case
+                if render == "c1":
+                    class_id_dbg = int(logits_c1_dbg.argmax(dim=1).item())
+                else:
+                    class_id_dbg = int(logits_c2_dbg.argmax(dim=1).item())
+
+        print(f"DEBUG single-point: lon={debug_lon_val:.4f}, lat={debug_lat_val:.4f}, c1_id={class_id_dbg}")
+        print("DEBUG logits_c1_dbg[:10]:", logits_c1_dbg[0, :10].detach().cpu().numpy())
+
+
     with torch.no_grad():
         for s_idx in range(0, N, batch_size):
             e_idx = min(N, s_idx + batch_size)
             u = torch.from_numpy(xyz[s_idx:e_idx]).to(device)  # (B,3)
 
+            if s_idx == 0:
+                norms = u.norm(dim=1)
+                print("DEBUG raster norms: min", norms.min().item(),
+                    "max", norms.max().item(),
+                    "mean", norms.mean().item())
             # Multi-head forward: distance + two class heads
+            
             pred_log1p, logits_c1, logits_c2 = model(u)
             pred_log1p = pred_log1p.squeeze(-1)
-
+            
             # --- distance-only rendering ---
             if render == "distance":
                 if model_outputs_log1p:
@@ -333,17 +399,28 @@ def rasterize_model_from_checkpoint(
                 # temperature scaling: logits / tau
                 if render == "c1":
                     logits = logits_c1 / max(1e-6, float(tau))
+                    pw = torch.tensor(pw_c1, dtype=torch.float32, device=device) if pw_c1 is not None else None
                 else:
                     logits = logits_c2 / max(1e-6, float(tau))
+                    pw = torch.tensor(pw_c2, dtype=torch.float32, device=device) if pw_c1 is not None else None
 
-                # ecoc_decode returns *class IDs*, not indices
-                class_ids_t = ecoc_decode(
+                
+                t = '''class_ids_t = ecoc_decode(
                     logits,
                     codebook=codebook,
                     pos_weight=None,
                     mode="soft",
                 )
-                class_ids = class_ids_t.long().cpu().numpy()
+                class_ids = class_ids_t.long().cpu().numpy()'''
+                
+                idxs = _ecoc_decode_soft_old(logits, bits_t, tau).cpu().numpy()
+                class_ids = ids_np[idxs]
+                if s_idx == 0:
+                    unique, counts = np.unique(class_ids, return_counts=True)
+                    print("DEBUG raster first batch unique IDs:", unique[:10], "counts:", counts[:10])
+                    #print("logits_c1[0][:10] =", logits_c1[0, :10].detach().cpu().numpy())
+                
+            
             else:
                 # softmax: logits_* are (B, C) over contiguous class indices
                 if render == "c1":
@@ -446,6 +523,6 @@ def raster(model_name, mode,
         global_z=global_z,
         regularize_hyperparams=regularize_hyperparams
     )
-    path = f"raster/{model_name}_{render}_map_{area}"
+    path = f"raster/{model_name}_{depth}x{layer}_{render}_map_{area}"
     save_png(img, f"{path}.png")
     print(f"Saved to {path}.png")

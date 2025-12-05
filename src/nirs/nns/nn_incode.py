@@ -129,7 +129,7 @@ class INCODE_NIR(nn.Module):
                  rff_sigma: float = 1.0,
                  # harmonizer
                  harmonizer_hidden: int = 64,
-                 per_layer: bool = True,
+                 per_layer: bool = False,
                  # heads
                  class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32),
                  head_layers: Tuple[int,...] = (),

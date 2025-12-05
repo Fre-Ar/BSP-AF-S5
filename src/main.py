@@ -8,10 +8,10 @@ from nirs.training import train_and_eval
 
 from utils.utils_geo import COUNTRIES_ECOC_PATH, TRAINING_DATA_PATH, CHECKPOINT_PATH
 
-MODEL = "siren"
+MODEL = "split_siren"
 MODE = "ecoc" 
-DEPTH = 5
-LAYER = 256
+DEPTH = 17
+LAYER = 128
 LAYER_COUNTS = (LAYER,)*DEPTH
 
 W0 = 30.0 
@@ -24,16 +24,21 @@ REG_HYPER = True
 def train():
     """
     On MPS:
-        20 epochs -> 150s (99s if plugged in)
+        1mb model:
+            20 epochs -> 150s (99s if plugged in)
+        4mb model:
+            20 epochs -> 240s
     """
     PATH = os.path.join(TRAINING_DATA_PATH, "eval_uniform_1M.parquet")
+    #PATH = os.path.join(TRAINING_DATA_PATH, "log_dataset_1M.parquet")
+    #PATH = os.path.join(TRAINING_DATA_PATH, "training_1M.parquet")
     
     t0 = time.perf_counter()
     train_and_eval(
         PATH,
-        epochs=20,
+        epochs=200,
         batch_size = 8192,
-       
+        #lr=3e-4,
         
         model_name=MODEL,
         layer_counts=LAYER_COUNTS,
@@ -50,12 +55,14 @@ def train():
     dt = time.perf_counter() - t0
     print(f"Total training time Elapsed: {dt:.3f}s")
 
-def viz():
+def viz(pred: bool = False):
     model_path = f"{CHECKPOINT_PATH}/{MODEL}_{MODE}_1M_{DEPTH}x{LAYER}_w0{W0}_wh{WH}.pt" 
     
     compare_parquet_and_model_ecoc(
-        #parquet_path=os.path.join(TRAINING_DATA_PATH, "log_dataset_1M.parquet"),
-        parquet_path=os.path.join(TRAINING_DATA_PATH, "eval_uniform_1M.parquet"),
+        parquet_path=os.path.join(TRAINING_DATA_PATH, "log_dataset_1M.parquet"),
+        #parquet_path=os.path.join(TRAINING_DATA_PATH, "eval_uniform_1M.parquet"),
+        #parquet_path=os.path.join(TRAINING_DATA_PATH, "eval_border_1M.parquet"),
+    
         checkpoint_path=model_path,
         model_name=MODEL,
         
@@ -65,7 +72,7 @@ def viz():
         sample=1_000_000,
         model_outputs_log1p=True,
         
-        predictions_only=False,
+        predictions_only=pred,
         
         overrides={180: "#000000"}, #australia becomes black
         
@@ -93,6 +100,6 @@ def img():
     print(f"Total rasterization time Elapsed: {dt:.3f}s")
     
 if __name__ == "__main__":
-    train()
-    #viz()
+    #train()
+    viz()
     #img()

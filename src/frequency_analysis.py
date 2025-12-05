@@ -338,6 +338,6 @@ def main():
 
 
 if __name__ == "__main__":
-    border_length()
-    #main()
+    #border_length()
+    main()
     #print("hi")

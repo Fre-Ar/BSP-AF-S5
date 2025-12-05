@@ -654,6 +654,8 @@ def train_and_eval(
                     "global_z": global_z,
                     "encoder_params": encoder_params,
                     "epochs": epochs,
+                    "pos_weight_c1": pw_c1.cpu().tolist() if pw_c1 is not None else None,
+                    "pos_weight_c2": pw_c2.cpu().tolist() if pw_c2 is not None else None,
                 },
             }
             
