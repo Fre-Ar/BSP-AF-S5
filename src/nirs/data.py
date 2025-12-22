@@ -202,13 +202,18 @@ def make_dataloaders(
             n_classes_c1=train_ds.num_classes_c1,
             n_classes_c2=train_ds.num_classes_c2)
 
+    # Detect device (mps, cuda, or cpu)
+    from utils.utils import get_default_device
+    device = get_default_device()
+    use_pin_memory = str(device) in ("cuda")
+    
     # create the dataloaders
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
         shuffle=True,
         num_workers=4,
-        pin_memory=True,
+        pin_memory=use_pin_memory,
         persistent_workers=True
     )
     val_loader = DataLoader(
@@ -216,7 +221,7 @@ def make_dataloaders(
         batch_size=batch_size,
         shuffle=False,
         num_workers=4,
-        pin_memory=True,
+        pin_memory=use_pin_memory,
         persistent_workers=True
     )
     return train_loader, val_loader, class_cfg, codebook

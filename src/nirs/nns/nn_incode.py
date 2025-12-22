@@ -80,7 +80,10 @@ class INCODETrunk(nn.Module):
 
         # SIREN init per layer
         for i, lin in enumerate(self.net):
-            init_siren_linear(lin, layer_counts[i], i, w=self.w0s[i])
+            # For layer 0, input is in_dim (3). For others, it's the width of the prev layer.
+            actual_in_dim = in_dim if i == 0 else layer_counts[i-1]
+            
+            init_siren_linear(lin, actual_in_dim, i, w=self.w0s[i])
 
     def forward(self, x: torch.Tensor, a, b, c, d) -> torch.Tensor:
         if x.dim() == 1:
@@ -108,13 +111,15 @@ class INCODETrunk(nn.Module):
         return h  # (B, hidden_dim)
 
 # ---------------------------
-# Full NIR (continuous z(x) via RFF)
+# Full NIR (continuous z(x) via RFF or Global Z)
 # ---------------------------
 class INCODE_NIR(nn.Module):
     '''
     INCODE variant without codebooks/tiling:
-      - x → RFF features φ(x)
-      - harmonizer(φ(x)) → (a,b,c,d) per-layer (default)
+      - If learn_global_z=False: x -> RFF features -> Harmonizer -> (a,b,c,d)
+      - If learn_global_z=True:  Global Latent z -> Harmonizer -> (a,b,c,d)
+        - x → RFF features φ(x)
+        - harmonizer(φ(x)) → (a,b,c,d) per-layer (default)
       - SIREN trunk with per-layer modulation
       - three heads: distance, c1, c2
     '''
@@ -123,23 +128,37 @@ class INCODE_NIR(nn.Module):
                  layer_counts: Tuple[int,...] = (256,)*5,
                  # SIREN w0
                  w0_first: float = 30.0,
-                 w0_hidden: float = 1.0,
+                 w0_hidden: float = 1.0,    
                  # x-conditioning features
                  rff_m: int = 64,
                  rff_sigma: float = 1.0,
                  # harmonizer
                  harmonizer_hidden: int = 64,
                  per_layer: bool = False,
+                 # Latent code global z
+                 learn_global_z: bool = False,
+                 z_dim: int = 64, # Latent dimension 
                  # heads
                  class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32),
                  head_layers: Tuple[int,...] = (),
                  head_activation: Optional[nn.Module] = None,
                  bias: bool = True):
         super().__init__()
-        self.encoder = RFF(in_dim=in_dim, m=rff_m, sigma=rff_sigma)
+        self.learn_global_z = learn_global_z
+        if self.learn_global_z:
+            # Global Z Mode: Learn a single latent vector
+            self.global_z = nn.Parameter(torch.randn(1, z_dim) * 0.01)
+            harmonizer_in_dim = z_dim
+            self.encoder = None # RFF not used
+        else:
+            # RFF Mode: Encode coordinates spatially
+            self.encoder = RFF(in_dim=in_dim, m=rff_m, sigma=rff_sigma)
+            harmonizer_in_dim = self.encoder.out_dim
+            self.global_z = None
+        
         self.trunk = INCODETrunk(in_dim=in_dim, layer_counts=layer_counts,
                                  w0_first=w0_first, w0_hidden=w0_hidden, bias=bias)
-        self.harmonizer = Harmonizer(in_dim=self.encoder.out_dim,
+        self.harmonizer = Harmonizer(in_dim=harmonizer_in_dim,
                                      hidden=harmonizer_hidden,
                                      n_layers=len(layer_counts),
                                      per_layer=per_layer)
@@ -159,12 +178,14 @@ class INCODE_NIR(nn.Module):
                 layers += [nn.Linear(prev, hdim), act]
                 prev = hdim
             layers += [nn.Linear(prev, out_dim)]
-            seq = nn.Sequential(*layers); seq.apply(init_linear); return seq
+            seq = nn.Sequential(*layers)
+            seq.apply(init_linear); return seq
 
         if class_cfg.class_mode == "ecoc":
             out_c1 = out_c2 = class_cfg.n_bits
         elif class_cfg.class_mode == "softmax":
-            out_c1 = class_cfg.n_classes_c1; out_c2 = class_cfg.n_classes_c2
+            out_c1 = class_cfg.n_classes_c1
+            out_c2 = class_cfg.n_classes_c2
         else:
             raise ValueError(f"Unknown class_mode={class_cfg.class_mode}")
 
@@ -185,8 +206,18 @@ class INCODE_NIR(nn.Module):
     def forward(self, x: torch.Tensor, return_abcd: bool = False):
         if x.dim() == 1:
             x = x.unsqueeze(0)
+        B = x.shape[0]
         # x -> features -> (a,b,c,d)
-        f = self.encoder(x)                   # (B, 2m)
+        # 1. Get input for Harmonizer
+        if self.learn_global_z:
+            # Broadcast global z to batch size
+            # Using repeat() instead of expand() to avoid 0-stride buffer crashes
+            f = self.global_z.repeat(B, 1)
+            #f = self.global_z.expand(B, -1)
+        else:
+            # Encode coordinates
+            f = self.encoder(x) # (B, 2m) 
+        
         a, b, c, d = self.harmonizer(f)       # per-layer by default
         # trunk
         h = self.trunk(x, a, b, c, d)         # (B, hidden)

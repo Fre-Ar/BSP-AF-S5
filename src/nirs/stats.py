@@ -553,8 +553,8 @@ def neuron_counter(in_dim = 3, layer_counts: tuple = (256,)*5, head_counts = (),
     
     return f"n: {total} | {round(total*0.000004, 2)} mb" 
 
-width = 256
-depth = 6
+width = 512
+depth = 4
 layer_counts = (width,)*depth
 #layer_counts = (256,128)*5
 print(neuron_counter(

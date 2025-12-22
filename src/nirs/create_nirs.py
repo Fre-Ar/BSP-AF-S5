@@ -109,7 +109,38 @@ def build_split_siren(layer_counts, class_cfg, w0_first=30.0, w0_hidden=1.0):
         params=((w0_first,),)+((w0_hidden,),)*(len(layer_counts)-1),
         class_cfg = class_cfg)
     return model
- 
+
+def get_model_path(model_name="relu", layer_counts=(256,)*5, mode="ecoc", params=None, encoder_params=None, n_training=1_000_000, regularize_hyperparams=False):
+    """
+    Generates the standardized checkpoint path for a given model configuration.
+    Useful for checking if a model already exists without building it.
+    """
+    # Base naming scheme
+    base_name = f"{model_name}_{mode}_{human_int(n_training)}_{len(layer_counts)}x{layer_counts[0]}"
+    suffix = ""
+
+    match model_name.lower():
+        case "siren" | "split_siren":
+            suffix = f"_w0{params[0]}_wh{params[1]}.pt"
+        case "relu":
+            suffix = ".pt"
+        case "incode":
+            reg = "reg_" if regularize_hyperparams else ""
+            tiling = "global_z" if params[4] else "RFF"
+            suffix = f"_w0{params[0]}_wh{params[1]}_{reg}{tiling}.pt"
+        case "gauss":
+            suffix = f"_s{params[2]}.pt"
+        case "hosc":
+            suffix = f"_beta{params[3]}.pt"
+        case "sinc":
+            suffix = f"_w0{params[0]}.pt"
+        case 'encod_basic' | 'encod_pos' | 'encod_rff':
+            suffix = f"_p{encoder_params}.pt"
+        case _:
+            raise ValueError(f"Unknown model name for path generation: {model_name}")
+            
+    return base_name + suffix
+
 # TODO: reintroduce head layers
 def build_model(model_name="relu", layer_counts=(256,)*5, mode="ecoc", params=None, encoder_params=None, n_training=1_000_000, regularize_hyperparams=False):
     """
@@ -133,49 +164,41 @@ def build_model(model_name="relu", layer_counts=(256,)*5, mode="ecoc", params=No
     -------
     model
     """
+    # 1. Generate the path using the helper
+    save_path = get_model_path(
+        model_name, layer_counts, mode, params, encoder_params, n_training, regularize_hyperparams
+    )
+
+    # 2. Configure Class Heads
     cfg = ClassHeadConfig(class_mode=mode,
                         n_bits=ECOC_BITS,
                         n_classes_c1=NUM_COUNTRIES,
                         n_classes_c2=NUM_COUNTRIES)
     
-    save_path = f"{model_name}_{mode}_{human_int(n_training)}_{len(layer_counts)}x{layer_counts[0]}"
-
+    # 3. Build the specific architecture
     match model_name.lower():
         case "siren":
-            save_path += f"_w0{params[0]}_wh{params[1]}.pt"
-            return build_siren(layer_counts, cfg, params[0], params[1]), save_path
+            model = build_siren(layer_counts, cfg, params[0], params[1])
         case "relu":
-            save_path += ".pt"
-            return build_relu(layer_counts, cfg), save_path
+            model = build_relu(layer_counts, cfg)
         case "incode":
-            reg = "reg_" if regularize_hyperparams else ""
-            tiling = "global_z" if params[4] else "tiled"
-            save_path += f"_w0{params[0]}_wh{params[1]}_{reg}{tiling}.pt"
-            return build_incode(layer_counts, cfg, params[0], params[1], params[4]), save_path
+            # params[4] is learn_global_z
+            model = build_incode(layer_counts, cfg, params[0], params[1], params[4])
         case "gauss":
-            save_path += f"_s{params[2]}.pt"
-            return build_gauss(layer_counts, cfg, params[2]), save_path
+            model = build_gauss(layer_counts, cfg, params[2])
         case "hosc":
-            save_path += f"_beta{params[3]}.pt"
-            return build_hosc(layer_counts, cfg, params[3]), save_path
+            model = build_hosc(layer_counts, cfg, params[3])
         case "sinc":
-            save_path += f"_w0{params[0]}.pt"
-            return build_sinc(layer_counts, cfg, params[0]), save_path
+            model = build_sinc(layer_counts, cfg, params[0])
         case 'encod_basic':
-            save_path += f"_p{encoder_params}.pt"
-            return build_encod_basic(layer_counts, cfg, encoder_params), save_path
+            model = build_encod_basic(layer_counts, cfg, encoder_params)
         case 'encod_pos':
-            save_path += f"_p{encoder_params}.pt"
-            return build_encod_pos(layer_counts, cfg, encoder_params), save_path
+            model = build_encod_pos(layer_counts, cfg, encoder_params)
         case 'encod_rff':
-            save_path += f"_p{encoder_params}.pt"
-            return build_encod_rff(layer_counts, cfg, encoder_params), save_path
-        
+            model = build_encod_rff(layer_counts, cfg, encoder_params)
         case 'split_siren':
-            save_path += f"_w0{params[0]}_wh{params[1]}.pt"
-            return build_split_siren(layer_counts, cfg, params[0], params[1]), save_path
-        
+            model = build_split_siren(layer_counts, cfg, params[0], params[1])
         case _:
             raise ValueError(f"Unknown model name: {model_name}")
 
-
+    return model, save_path

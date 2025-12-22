@@ -64,9 +64,12 @@ def _forward_model(
     """
     # INCODE has a slightly different signature and returns extra hyperparams
     if model_name.lower() == "incode":
-        pred_log1p_dist, c1_logits, c2_logits, reg_params = model(
-            xyz, regularize_hyperparams
-        )
+        output = model( xyz, regularize_hyperparams )
+        if regularize_hyperparams:
+            pred_log1p_dist, c1_logits, c2_logits, reg_params = output
+        else:
+           pred_log1p_dist, c1_logits, c2_logits = output
+           reg_params = None 
     else:
         pred_log1p_dist, c1_logits, c2_logits = model(xyz)
         reg_params = None
@@ -562,7 +565,8 @@ def train_and_eval(
         layer_counts,
         label_mode,
         (w0, w_hidden, s, beta, global_z),
-        encoder_params)
+        encoder_params, 
+        regularize_hyperparams=regularize_hyperparams)
     model = model.to(device)
 
     uw = UncertaintyWeighting().to(device) if use_uncertainty_loss_weighting else None
