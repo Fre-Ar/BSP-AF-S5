@@ -6,7 +6,7 @@ import torch.nn as nn
 from .nir import NIRLayer
 
 class Hosc(nn.Module):
-    def __init__(self, beta=1.0, adaptive = False): 
+    def __init__(self, beta=8.0, adaptive = False): 
         super().__init__()
         self.adaptive = adaptive
         if adaptive:

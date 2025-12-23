@@ -5,6 +5,7 @@ import torch.nn as nn
 
 from .nir import NIRLayer
 
+#  sin( ω(|x|+1)x )
 class Finer(nn.Module):
     def __init__(self, w=torch.pi): 
         super().__init__()

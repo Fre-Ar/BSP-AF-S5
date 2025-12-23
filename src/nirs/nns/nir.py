@@ -26,6 +26,7 @@ class NIRLayer(nn.Module):
         if self.complex and (not torch.is_complex(x)):
             x = x.to(torch.cfloat)
         y = self.activation(self.linear(x))
+        # TODO: Better check for last layer
         if self.complex and self.ith_layer < 0:
             y = y.real
         return y

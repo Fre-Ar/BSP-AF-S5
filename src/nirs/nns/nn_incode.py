@@ -29,6 +29,7 @@ class Harmonizer(nn.Module):
         )
         self._init_weights()
 
+    # TODO: Change weights such that the last bias is 0.31, not first
     def _init_weights(self):
         with torch.no_grad():
             for m in self.net.modules():
@@ -130,6 +131,7 @@ class INCODE_NIR(nn.Module):
                  w0_first: float = 30.0,
                  w0_hidden: float = 1.0,    
                  # x-conditioning features
+                 # TODO: the latent code size will be bigger than 64 if rff_m = 64
                  rff_m: int = 64,
                  rff_sigma: float = 1.0,
                  # harmonizer
