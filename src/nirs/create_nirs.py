@@ -9,6 +9,7 @@ from .nns.nn_sinc import SINCLayer
 from .nns.fourier_features import BasicEncoding, PositionalEncoding, RandomGaussianEncoding
 from .nns.nir import MultiHeadNIR, ClassHeadConfig
 from .nns.nn_split import SplitNIR
+from .inference import InferenceConfig
  
 from utils.utils_geo import ECOC_BITS, NUM_COUNTRIES
 from utils.utils import human_int, pretty_tuple, trimf
@@ -111,115 +112,89 @@ def build_split_siren(layer_counts, class_cfg, w0_first=30.0, w0_hidden=1.0):
     return model
 
 def get_model_path(
-    model_name="relu",
-    init_regime="default",
-    encoding=None,
-    layer_counts=(256,)*5,
-    mode="ecoc",
-    params=None,
-    encoder_params=None,
-    n_training=1_000_000,
-    regularize_hyperparams=False):
+    model_cfg: InferenceConfig,
+    n_training=1_000_000):
     """
     Generates the standardized checkpoint path for a given model configuration.
-    Useful for checking if a model already exists without building it.
     """
     # Base naming scheme
-    layer_str = pretty_tuple(layer_counts)[1:-1].replace(' ', '').replace(',', '+')
-    base_name = f"{model_name}_init-{init_regime}{f'_encod-{encoding}' if encoding else ''}_{mode}_{human_int(n_training)}_{layer_str}"
+    layer_str = pretty_tuple(model_cfg.layer_counts)[1:-1].replace(' ', '').replace(',', '+')
+    base_name = f"{model_cfg.model_name}_init-{model_cfg.init_regime}{f'_encod-{model_cfg.encoding}' if model_cfg.encoding else ''}_{model_cfg.label_mode}_{human_int(n_training)}_{layer_str}"
     suffix = ""
 
-    match model_name.lower():
+    match model_cfg.model_name.lower():
         case "siren" | "split_siren":
-            suffix = f"_w0{trimf(params[0])}_wh{trimf(params[1])}.pt"
+            suffix = f"_w0{trimf(model_cfg.w0)}_wh{trimf(model_cfg.w_hidden)}.pt"
         case "relu":
             suffix = ".pt"
         case "incode":
-            reg = "reg_" if regularize_hyperparams else ""
-            tiling = "global_z" if params[5] else "RFF"
-            suffix = f"_w0{trimf(params[0])}_wh{trimf(params[1])}_{reg}{tiling}.pt"
+            reg = "reg_" if model_cfg.regularize_hyperparams else ""
+            tiling = "global_z" if model_cfg.global_z else "RFF"
+            suffix = f"_w0{trimf(model_cfg.w0)}_wh{trimf(model_cfg.w_hidden)}_{reg}{tiling}.pt"
         case "gauss":
-            suffix = f"_s{trimf(params[2])}.pt"
+            suffix = f"_s{trimf(model_cfg.s)}.pt"
         case "hosc":
-            suffix = f"_beta{trimf(params[3])}.pt"
+            suffix = f"_beta{trimf(model_cfg.beta)}.pt"
         case "sinc":
-            suffix = f"_w0{trimf(params[0])}.pt"
+            suffix = f"_w0{trimf(model_cfg.w0)}.pt"
         case 'encod_basic' | 'encod_pos' | 'encod_rff':
-            suffix = f"_p{encoder_params}.pt"
+            suffix = f"_p{model_cfg.encoder_params}.pt"
         case _:
-            raise ValueError(f"Unknown model name for path generation: {model_name}")
+            raise ValueError(f"Unknown model name for path generation: {model_cfg.model_name}")
             
     return base_name + suffix
 
 # TODO: reintroduce head layers
 def build_model(
-    model_name="relu",
-    init_regime="default",
-    encoding=None,
-    layer_counts=(256,)*5,
-    mode="ecoc",
-    params=None,
-    encoder_params=None,
-    n_training=1_000_000,
-    regularize_hyperparams=False):
+    model_cfg: InferenceConfig,
+    n_training=1_000_000):
     """
     Dynamically builds a NIR.
     
     Parameters
     ----------
-    model_name : str
-        Name of the architecture to use.
-    layer_counts : tuple
-        A tuple with the widths of the hidden layers. 
-        If given (256,)*5, then the NIR will have 5 hidden layers (and thus 6 weight tensors and 6 bias tensors)
-    mode : str
-        Classification mode. One of 'ecoc' and 'softmax'.
-    params : tuple
-        Parameters for the NIRs. In the order of (w0, w_hidden, s, beta, k, global_z, FR_f, FR_p)
-    encoder_params : tuple
-        Parameters for the encoding, in the order of (m, sigma, alpha)
+    model_cfg : InferenceConfig
+        The configuration of the model
 
     Returns
     -------
     model
     """
     # 1. Generate the path using the helper
-    save_path = get_model_path(
-        model_name, init_regime, encoding, layer_counts, mode, params, encoder_params, n_training, regularize_hyperparams
-    )
+    save_path = get_model_path(model_cfg, n_training)
     
     # TODO: Make encoding play nice with everyone else
 
     # 2. Configure Class Heads
-    cfg = ClassHeadConfig(class_mode=mode,
+    cfg = ClassHeadConfig(class_mode=model_cfg.label_mode,
                         n_bits=ECOC_BITS,
                         n_classes_c1=NUM_COUNTRIES,
                         n_classes_c2=NUM_COUNTRIES)
     
     # 3. Build the specific architecture
-    match model_name.lower():
+    match model_cfg.model_name.lower():
         case "siren":
-            model = build_siren(layer_counts, cfg, params[0], params[1])
+            model = build_siren(model_cfg.layer_counts, cfg, model_cfg.w0, model_cfg.w_hidden)
         case "relu":
-            model = build_relu(layer_counts, cfg)
+            model = build_relu(model_cfg.layer_counts, cfg)
         case "incode":
             # params[4] is learn_global_z
-            model = build_incode(layer_counts, cfg, params[0], params[1], params[5])
+            model = build_incode(model_cfg.layer_counts, cfg, model_cfg.w0, model_cfg.w_hidden, model_cfg.global_z)
         case "gauss":
-            model = build_gauss(layer_counts, cfg, params[2])
+            model = build_gauss(model_cfg.layer_counts, cfg, model_cfg.s)
         case "hosc":
-            model = build_hosc(layer_counts, cfg, params[3])
+            model = build_hosc(model_cfg.layer_counts, cfg, model_cfg.beta)
         case "sinc":
-            model = build_sinc(layer_counts, cfg, params[0])
+            model = build_sinc(model_cfg.layer_counts, cfg, model_cfg.w0)
         case 'encod_basic':
-            model = build_encod_basic(layer_counts, cfg, encoder_params)
+            model = build_encod_basic(model_cfg.layer_counts, cfg, model_cfg.encoder_params)
         case 'encod_pos':
-            model = build_encod_pos(layer_counts, cfg, encoder_params)
+            model = build_encod_pos(model_cfg.layer_counts, cfg, model_cfg.encoder_params)
         case 'encod_rff':
-            model = build_encod_rff(layer_counts, cfg, encoder_params)
+            model = build_encod_rff(model_cfg.layer_counts, cfg, model_cfg.encoder_params)
         case 'split_siren':
-            model = build_split_siren(layer_counts, cfg, params[0], params[1])
+            model = build_split_siren(model_cfg.layer_counts, cfg, model_cfg.w0, model_cfg.w_hidden)
         case _:
-            raise ValueError(f"Unknown model name: {model_name}")
+            raise ValueError(f"Unknown model name: {model_cfg.model_name}")
 
     return model, save_path

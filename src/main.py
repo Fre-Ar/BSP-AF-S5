@@ -1,11 +1,14 @@
 # src/main.py
 import os
 import time
+import math
 
 from nirs.viz.compare_data_viz import compare_parquet_and_model_ecoc
 from nirs.viz.rasterizer import raster
 from nirs.training import train_and_eval
 from nirs.create_nirs import get_model_path
+from nirs.inference import InferenceConfig
+from utils.utils import get_default_device
 
 from utils.utils_geo import COUNTRIES_ECOC_PATH, TRAINING_DATA_PATH, CHECKPOINT_PATH
 
@@ -16,13 +19,29 @@ MODE = "ecoc"
 DEPTH = 5
 LAYER = 512
 LAYER_COUNTS = (LAYER,)*DEPTH
+HEAD_LAYERS = ()
 
 W0 = 30.0 
 WH = 1.0
 S = 1.0
 BETA = 1.0
+K = 20.0
 GLOBAL_Z = False # False enables RFF latent Z code
 REG_HYPER = True
+FR_F = 256
+FR_P = 8
+
+ENCODER_PARAMS = (16, 2.0 * math.pi, 1.0)
+
+MODEL_CONFIG = InferenceConfig(
+    MODEL, INIT_REGIME, ENCODING,
+    LAYER_COUNTS, HEAD_LAYERS,
+    W0, WH, S, BETA, K,
+    GLOBAL_Z, REG_HYPER,
+    FR_F ,FR_P,
+    ENCODER_PARAMS,
+    MODE, COUNTRIES_ECOC_PATH
+)
 
 TRAINING_POINTS = 1_000_000
 
@@ -45,37 +64,19 @@ def train():
     t0 = time.perf_counter()
     train_and_eval(
         PATH,
+        model_cfg=MODEL_CONFIG,
         epochs=20,
         batch_size = 8192,
+        traning_size = TRAINING_POINTS,
         #lr=3e-4,
-        
-        model_name=MODEL,
-        init_regime=INIT_REGIME,
-        encoding=ENCODING,
-        layer_counts=LAYER_COUNTS,
-        
-        label_mode=MODE,
-
-        w0=W0,
-        w_hidden=WH,
-        beta=BETA,
-        s=S,
-        
-        regularize_hyperparams=REG_HYPER,
-        global_z=GLOBAL_Z
         )
     dt = time.perf_counter() - t0
     print(f"Total training time Elapsed: {dt:.3f}s")
 
 def viz(pred: bool = False):
     model_path = get_model_path(
-        model_name=MODEL,
-        layer_counts=LAYER_COUNTS,
-        mode=MODE,
-        params=(W0, WH, S, BETA, GLOBAL_Z),
-        encoder_params=None,
-        n_training=TRAINING_POINTS,
-        regularize_hyperparams=REG_HYPER)    
+        model_cfg=MODEL_CONFIG,
+        n_training=TRAINING_POINTS,)    
     model_path = f"{CHECKPOINT_PATH}/{model_path}" 
     
     compare_parquet_and_model_ecoc(

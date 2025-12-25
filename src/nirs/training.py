@@ -24,6 +24,7 @@ from .create_nirs import build_model
 from .engine import compute_potential_ecoc_pos_weights
 from .data import make_dataloaders
 from .metrics import compute_distance_metrics, compute_classification_metrics
+from .inference import InferenceConfig
 
 from geodata.ecoc.ecoc import per_bit_threshold, _prepare_codebook_tensor
 from utils.utils import get_default_device, trimf, pretty_tuple
@@ -306,24 +307,9 @@ def setup_logging(
     parquet_path: str,
     num_params: int,
     
-    model_name: str,
-    init_regime: str,
-    encoding: str | None,
-    layer_counts: tuple,
-    
-    w0: float ,
-    w_hidden: float,
-    s: float,
-    beta: float,
-    k: float,
-    global_z: bool ,
-    regularize_hyperparams: bool,
-    FR_f: float,
-    FR_p: float,
-    encoder_params: tuple,
+    model_cfg: InferenceConfig,
     lr: float,
-    weight_decay: float,
-    label_mode: str
+    weight_decay: float
 ):
     out_path = pathlib.Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -334,21 +320,21 @@ def setup_logging(
     csv_path = log_path / (save_path.stem + ".csv")
     
     hyper_params = [
-        f"ω0={trimf(w0)}",
-        f"ωh={trimf(w_hidden)}",
-        f"s={trimf(s)}",
-        f"β={trimf(beta)}",
-        f"k={trimf(k)}",
-        f"z={'global' if global_z else 'local'}",
-        f"reg={regularize_hyperparams}", 
-        f"F={trimf(FR_f)}",
-        f"P={trimf(FR_p)}",
+        f"ω0={trimf(model_cfg.w0)}",
+        f"ωh={trimf(model_cfg.w_hidden)}",
+        f"s={trimf(model_cfg.s)}",
+        f"β={trimf(model_cfg.beta)}",
+        f"k={trimf(model_cfg.k)}",
+        f"z={'global' if model_cfg.global_z else 'local'}",
+        f"reg={model_cfg.regularize_hyperparams}", 
+        f"F={trimf(model_cfg.FR_f)}",
+        f"P={trimf(model_cfg.FR_p)}",
     ]
     
     enc_params = [
-        f"m={trimf(encoder_params[0])}",
-        f"σ={trimf(encoder_params[1])}",
-        f"α={trimf(encoder_params[2])}",
+        f"m={trimf(model_cfg.encoder_params[0])}",
+        f"σ={trimf(model_cfg.encoder_params[1])}",
+        f"α={trimf(model_cfg.encoder_params[2])}",
     ]
     hyper_params = ';'.join(hyper_params)
     enc_params = ';'.join(enc_params)
@@ -356,11 +342,11 @@ def setup_logging(
 
     # Static Global Params
     global_meta = {
-        "model": model_name,
-        "init": init_regime,
-        "encoding": str(encoding),
-        "layers": pretty_tuple(layer_counts), 
-        "mode": label_mode,
+        "model": model_cfg.model_name,
+        "init": model_cfg.init_regime,
+        "encoding": str(model_cfg.encoding),
+        "layers": pretty_tuple(model_cfg.layer_counts), 
+        "mode": model_cfg.label_mode,
         "lr": lr,
         "wd": weight_decay,
         "params": f"{trimf(num_params*1e-6)}M",
@@ -376,29 +362,13 @@ def setup_logging(
 
 def train_and_eval(
     parquet_path: str,
-    codes_path: str | None = COUNTRIES_ECOC_PATH,
-    out_dir: str | os.PathLike = CHECKPOINT_PATH,
+    model_cfg: InferenceConfig,
+    out_dir: str = CHECKPOINT_PATH,
     log_dir: str | os.PathLike = TRAINING_LOG_PATH,
     
-    batch_size: int = 8192,
     epochs: int = 10,
-    
-    model_name: str = "siren",
-    init_regime: str = "siren",
-    encoding: str | None = None,
-    layer_counts: tuple = (256,)*5,
-    
-    w0: float = 30.0,
-    w_hidden: float = 1.0,
-    s: float = 1.0,
-    beta: float = 1.0,
-    k: float =  20.0,
-    global_z: bool = True,
-    regularize_hyperparams: bool = False,
-    FR_f: float = 256.0,
-    FR_p: float = 8.0,
-    
-    encoder_params: tuple = (16, 2.0 * math.pi, 1.0),
+    batch_size: int = 8192,
+    traning_size = 1_000_000,
     
     lr: float = 9e-4,
     weight_decay: float = 0.0,
@@ -406,11 +376,7 @@ def train_and_eval(
     use_uncertainty_loss_weighting: bool = False,
     
     val_lambda = 100,
-    
-    label_mode: str = "ecoc",
-    
-    device: str | None = None,
-    head_layers: tuple = ()
+    device: str | None = None
 ):
     """
     Trains and evaluates a NIR architecture, saving the best out of all into a checkpoint.
@@ -421,15 +387,7 @@ def train_and_eval(
 
     t0 = time.perf_counter()
     # 1. Build Model
-    model, model_path = build_model(
-        model_name, 
-        init_regime,
-        encoding,
-        layer_counts,
-        label_mode,
-        (w0, w_hidden, s, beta, k, global_z, FR_f, FR_p),
-        encoder_params, 
-        regularize_hyperparams=regularize_hyperparams)
+    model, model_path = build_model(model_cfg, n_training=traning_size)
     model = model.to(device)
 
     # 2. Uncertainty Weighting
@@ -438,8 +396,8 @@ def train_and_eval(
     # 3. Data Loaders
     train_loader, val_loader, class_cfg, codebook = make_dataloaders(
         parquet_path=parquet_path,
-        label_mode=label_mode,
-        codes_path=codes_path,
+        label_mode=model_cfg.label_mode,
+        codes_path=model_cfg.codes_path,
         split=(0.9, 0.1),
         batch_size=batch_size,
         codebook=None,
@@ -454,12 +412,12 @@ def train_and_eval(
     opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
     
     # 5. ECOC pos Weights 
-    pw_c1, pw_c2 = compute_potential_ecoc_pos_weights(parquet_path, codebook, label_mode)
+    pw_c1, pw_c2 = compute_potential_ecoc_pos_weights(parquet_path, codebook, model_cfg.label_mode)
     
     # 6. Trainer Instance
     trainer = Trainer(
         model=model,
-        model_name=model_name,
+        model_name=model_cfg.model_name,
         optimizer=opt,
         device=device,
         loss_weights=LossWeights(*loss_weights),
@@ -468,15 +426,14 @@ def train_and_eval(
         pos_weight_c2=pw_c2,
         codebook=codebook,
         uw=uw,
-        regularize_hyperparams=regularize_hyperparams
+        regularize_hyperparams=model_cfg.regularize_hyperparams
     )
 
     # 7. Logging Setup
     num_params = sum(p.numel() for p in model.parameters())
     
     global_meta, save_path, csv_path = setup_logging(
-        out_dir,log_dir,model_path,parquet_path,num_params,model_name,init_regime,encoding,layer_counts,
-        w0,w_hidden,s,beta,k,global_z,regularize_hyperparams,FR_f,FR_p,encoder_params,lr,weight_decay,label_mode)
+        out_dir,log_dir,model_path,parquet_path,num_params,model_cfg,lr,weight_decay)
 
     history = []
     best_score = math.inf
@@ -486,7 +443,7 @@ def train_and_eval(
     start_time = time.perf_counter()
 
     
-    print(f"Start Training: {model_name} | {pretty_tuple(layer_counts)} | {label_mode}")
+    print(f"Start Training: {model_cfg.model_name} | {pretty_tuple(model_cfg.layer_counts)} | {model_cfg.label_mode}")
     
     # 8. Training Loop
     for ep in range(1, epochs + 1):
