@@ -265,12 +265,14 @@ class Trainer:
         
         # 2. Classification C1
         device_calc = self.device
+        gt_dist = gt_d.to(device_calc).flatten()
         
         if c1_gt is not None:
             c1_bits_tensor = cat(all_c1_bits).to(device_calc) if all_c1_bits else None
             
             c1_met = compute_classification_metrics(
                 c1_log.to(device_calc), c1_gt.to(device_calc), 
+                gt_dist,
                 self.class_cfg.class_mode, 
                 self.codes_mat,
                 self.class_ids,
@@ -286,6 +288,7 @@ class Trainer:
             
             c2_met = compute_classification_metrics(
                 c2_log.to(device_calc), c2_gt.to(device_calc), 
+                gt_dist,
                 self.class_cfg.class_mode, 
                 self.codes_mat,
                 self.class_ids,
@@ -304,6 +307,8 @@ def setup_logging(
     num_params: int,
     
     model_name: str,
+    init_regime: str,
+    encoding: str | None,
     layer_counts: tuple,
     
     w0: float ,
@@ -313,8 +318,11 @@ def setup_logging(
     k: float,
     global_z: bool ,
     regularize_hyperparams: bool,
+    FR_f: float,
+    FR_p: float,
     encoder_params: tuple,
     lr: float,
+    weight_decay: float,
     label_mode: str
 ):
     out_path = pathlib.Path(out_dir)
@@ -332,9 +340,11 @@ def setup_logging(
         f"β={trimf(beta)}",
         f"k={trimf(k)}",
         f"z={'global' if global_z else 'local'}",
-        f"reg={regularize_hyperparams}",
-        
+        f"reg={regularize_hyperparams}", 
+        f"F={trimf(FR_f)}",
+        f"P={trimf(FR_p)}",
     ]
+    
     enc_params = [
         f"m={trimf(encoder_params[0])}",
         f"σ={trimf(encoder_params[1])}",
@@ -347,9 +357,12 @@ def setup_logging(
     # Static Global Params
     global_meta = {
         "model": model_name,
+        "init": init_regime,
+        "encoding": str(encoding),
         "layers": pretty_tuple(layer_counts), 
         "mode": label_mode,
         "lr": lr,
+        "wd": weight_decay,
         "params": f"{trimf(num_params*1e-6)}M",
         "size": f"{trimf(num_params*4e-6)}MB",
         "hyper_params": hyper_params,
@@ -371,6 +384,8 @@ def train_and_eval(
     epochs: int = 10,
     
     model_name: str = "siren",
+    init_regime: str = "siren",
+    encoding: str | None = None,
     layer_counts: tuple = (256,)*5,
     
     w0: float = 30.0,
@@ -380,14 +395,17 @@ def train_and_eval(
     k: float =  20.0,
     global_z: bool = True,
     regularize_hyperparams: bool = False,
+    FR_f: float = 256.0,
+    FR_p: float = 8.0,
     
     encoder_params: tuple = (16, 2.0 * math.pi, 1.0),
     
     lr: float = 9e-4,
+    weight_decay: float = 0.0,
     loss_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
     use_uncertainty_loss_weighting: bool = False,
     
-    val_lambda = 50,
+    val_lambda = 100,
     
     label_mode: str = "ecoc",
     
@@ -405,9 +423,11 @@ def train_and_eval(
     # 1. Build Model
     model, model_path = build_model(
         model_name, 
+        init_regime,
+        encoding,
         layer_counts,
         label_mode,
-        (w0, w_hidden, s, beta, global_z),
+        (w0, w_hidden, s, beta, k, global_z, FR_f, FR_p),
         encoder_params, 
         regularize_hyperparams=regularize_hyperparams)
     model = model.to(device)
@@ -429,9 +449,9 @@ def train_and_eval(
     # 4. Optimizer
     params = [{"params": model.parameters()}]
     if uw is not None:
-        params.append({"params": uw.parameters(), "weight_decay": 0.0})
+        params.append({"params": uw.parameters(), "weight_decay": weight_decay})
     
-    opt = torch.optim.AdamW(params, lr=lr)
+    opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
     
     # 5. ECOC pos Weights 
     pw_c1, pw_c2 = compute_potential_ecoc_pos_weights(parquet_path, codebook, label_mode)
@@ -455,8 +475,8 @@ def train_and_eval(
     num_params = sum(p.numel() for p in model.parameters())
     
     global_meta, save_path, csv_path = setup_logging(
-        out_dir,log_dir,model_path,parquet_path,num_params,model_name,layer_counts,
-        w0,w_hidden,s,beta,k,global_z,regularize_hyperparams,encoder_params,lr,label_mode)
+        out_dir,log_dir,model_path,parquet_path,num_params,model_name,init_regime,encoding,layer_counts,
+        w0,w_hidden,s,beta,k,global_z,regularize_hyperparams,FR_f,FR_p,encoder_params,lr,weight_decay,label_mode)
 
     history = []
     best_score = math.inf
@@ -477,8 +497,8 @@ def train_and_eval(
         
         # --- Checkpoint Score ---
         rmse = val_stats.get("glob_RMSE")
-        acc_c1 = val_stats.get("c1_BalAcc", val_stats.get("c1_DecAcc", 0.0))
-        acc_c2 = val_stats.get("c2_BalAcc", val_stats.get("c2_DecAcc", 0.0))
+        acc_c1 = val_stats.get("c1_glob_BalAcc", val_stats.get("c1_glob_DecAcc", 0.0))
+        acc_c2 = val_stats.get("c2_glob_BalAcc", val_stats.get("c2_glob_DecAcc", 0.0))
         
         val_score = rmse + val_lambda * ((1.0 - acc_c1) + (1.0 - acc_c2))
         

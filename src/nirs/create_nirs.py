@@ -11,7 +11,7 @@ from .nns.nir import MultiHeadNIR, ClassHeadConfig
 from .nns.nn_split import SplitNIR
  
 from utils.utils_geo import ECOC_BITS, NUM_COUNTRIES
-from utils.utils import human_int
+from utils.utils import human_int, pretty_tuple, trimf
  
 def build_relu(layer_counts, class_cfg):
     model = MultiHeadNIR(
@@ -110,30 +110,40 @@ def build_split_siren(layer_counts, class_cfg, w0_first=30.0, w0_hidden=1.0):
         class_cfg = class_cfg)
     return model
 
-def get_model_path(model_name="relu", layer_counts=(256,)*5, mode="ecoc", params=None, encoder_params=None, n_training=1_000_000, regularize_hyperparams=False):
+def get_model_path(
+    model_name="relu",
+    init_regime="default",
+    encoding=None,
+    layer_counts=(256,)*5,
+    mode="ecoc",
+    params=None,
+    encoder_params=None,
+    n_training=1_000_000,
+    regularize_hyperparams=False):
     """
     Generates the standardized checkpoint path for a given model configuration.
     Useful for checking if a model already exists without building it.
     """
     # Base naming scheme
-    base_name = f"{model_name}_{mode}_{human_int(n_training)}_{len(layer_counts)}x{layer_counts[0]}"
+    layer_str = pretty_tuple(layer_counts)[1:-1].replace(' ', '').replace(',', '+')
+    base_name = f"{model_name}_init-{init_regime}{f'_encod-{encoding}' if encoding else ''}_{mode}_{human_int(n_training)}_{layer_str}"
     suffix = ""
 
     match model_name.lower():
         case "siren" | "split_siren":
-            suffix = f"_w0{params[0]}_wh{params[1]}.pt"
+            suffix = f"_w0{trimf(params[0])}_wh{trimf(params[1])}.pt"
         case "relu":
             suffix = ".pt"
         case "incode":
             reg = "reg_" if regularize_hyperparams else ""
-            tiling = "global_z" if params[4] else "RFF"
-            suffix = f"_w0{params[0]}_wh{params[1]}_{reg}{tiling}.pt"
+            tiling = "global_z" if params[5] else "RFF"
+            suffix = f"_w0{trimf(params[0])}_wh{trimf(params[1])}_{reg}{tiling}.pt"
         case "gauss":
-            suffix = f"_s{params[2]}.pt"
+            suffix = f"_s{trimf(params[2])}.pt"
         case "hosc":
-            suffix = f"_beta{params[3]}.pt"
+            suffix = f"_beta{trimf(params[3])}.pt"
         case "sinc":
-            suffix = f"_w0{params[0]}.pt"
+            suffix = f"_w0{trimf(params[0])}.pt"
         case 'encod_basic' | 'encod_pos' | 'encod_rff':
             suffix = f"_p{encoder_params}.pt"
         case _:
@@ -142,7 +152,16 @@ def get_model_path(model_name="relu", layer_counts=(256,)*5, mode="ecoc", params
     return base_name + suffix
 
 # TODO: reintroduce head layers
-def build_model(model_name="relu", layer_counts=(256,)*5, mode="ecoc", params=None, encoder_params=None, n_training=1_000_000, regularize_hyperparams=False):
+def build_model(
+    model_name="relu",
+    init_regime="default",
+    encoding=None,
+    layer_counts=(256,)*5,
+    mode="ecoc",
+    params=None,
+    encoder_params=None,
+    n_training=1_000_000,
+    regularize_hyperparams=False):
     """
     Dynamically builds a NIR.
     
@@ -156,7 +175,7 @@ def build_model(model_name="relu", layer_counts=(256,)*5, mode="ecoc", params=No
     mode : str
         Classification mode. One of 'ecoc' and 'softmax'.
     params : tuple
-        Parameters for the NIRs. In the order of (w0, w_hidden, s, beta, learn_global_z)
+        Parameters for the NIRs. In the order of (w0, w_hidden, s, beta, k, global_z, FR_f, FR_p)
     encoder_params : tuple
         Parameters for the encoding, in the order of (m, sigma, alpha)
 
@@ -166,8 +185,10 @@ def build_model(model_name="relu", layer_counts=(256,)*5, mode="ecoc", params=No
     """
     # 1. Generate the path using the helper
     save_path = get_model_path(
-        model_name, layer_counts, mode, params, encoder_params, n_training, regularize_hyperparams
+        model_name, init_regime, encoding, layer_counts, mode, params, encoder_params, n_training, regularize_hyperparams
     )
+    
+    # TODO: Make encoding play nice with everyone else
 
     # 2. Configure Class Heads
     cfg = ClassHeadConfig(class_mode=mode,
@@ -183,7 +204,7 @@ def build_model(model_name="relu", layer_counts=(256,)*5, mode="ecoc", params=No
             model = build_relu(layer_counts, cfg)
         case "incode":
             # params[4] is learn_global_z
-            model = build_incode(layer_counts, cfg, params[0], params[1], params[4])
+            model = build_incode(layer_counts, cfg, params[0], params[1], params[5])
         case "gauss":
             model = build_gauss(layer_counts, cfg, params[2])
         case "hosc":

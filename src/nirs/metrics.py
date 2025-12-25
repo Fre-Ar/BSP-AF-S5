@@ -31,7 +31,6 @@ def compute_distance_metrics(
             return
         
         # Basic
-        # TODO: make sure that the use of this mse_loss is actually performant.
         metrics[f"{prefix}RMSE"] = F.mse_loss(subset_diff, torch.zeros_like(subset_diff), reduction='mean').sqrt().item()
         metrics[f"{prefix}MAE"] = subset_abs.mean().item()
         metrics[f"{prefix}ME"] = subset_diff.mean().item() # Mean Error (Bias)
@@ -60,33 +59,36 @@ def compute_distance_metrics(
 def compute_classification_metrics(
     logits: torch.Tensor, 
     targets: torch.Tensor, 
+    target_dist_km: torch.Tensor,
     label_mode: str,
     codes_mat: torch.Tensor,         # Pre-converted [C, K] float tensor
     class_ids: torch.Tensor,         # Pre-converted [C] long tensor
     pos_weight: Optional[torch.Tensor] = None,
-    bits: Optional[torch.Tensor] = None
+    bits: Optional[torch.Tensor] = None,
+    bands: list[tuple[float, float]] = [(0, 25), (25, 150), (150, float('inf'))]
 ) -> Dict[str, float]:
     """
-    Computes classification metrics: Top1, BalAcc, ECE, T2Gap, Conf.
-    
-    logits:  cn_logits
-    targets: cn_idx
-    bits:    cn_bits
+    Computes classification metrics globally and per-band: Top1, BalAcc, ECE, T2Gap, Conf.
     """
     metrics = {}
-    targets = targets.to(logits.device)
+    device = logits.device
+    targets = targets.to(device)
+    target_dist_km = target_dist_km.to(device)
     
+    # --- Global Pre-computation (Vectorized) ---
+    # We decode everything once to get vectors of length N
     if label_mode == "ecoc":
         assert bits is not None, "ECOC mode requires bits"
         assert codes_mat is not None, "ECOC mode requires codebook"
         
         # 1. Compute Bit Accuracy
-        bits = bits.to(logits.device)
+        bits = bits.to(device)
         # Calculate threshold based on pos_weight 
-        threshold = per_bit_threshold(pos_weight, logits.device, bits.size(1))
+        threshold = per_bit_threshold(pos_weight, device, bits.size(1))
         pred_bits = (torch.sigmoid(logits) > threshold).float()
-        metrics["BitAcc"] = (pred_bits == bits).float().mean().item()
-
+        # Mean bit accuracy per sample
+        bit_correct_vec = (pred_bits == bits).float().mean(dim=1)
+        
         # 2. Decode to get Class Predictions and Raw Stats
         # All tensors of shape [B]
         idx_pred, confs, gaps = ecoc_decode(
@@ -108,20 +110,43 @@ def compute_classification_metrics(
         gaps  = top2_vals[:, 0] - top2_vals[:, 1] # Margin
 
         idx_pred = top2_idx[:, 0]
-
-    # Scalar Aggregates (Mean)
-    metrics["T2Gap"] = gaps.mean().item()
-    metrics["Conf"] = confs.mean().item()
     
-    # Compute Expensive Stats
-    stats = _compute_vectorized_stats(
-        preds = idx_pred,
-        targets = targets,
-        confs = confs,
-        num_classes=num_classes,
-        n_bins=10
-    )
-    metrics.update(stats)
+    # Helper for Aggregation
+    def _calc_subset(mask, prefix):
+        if not mask.any(): return
+
+        # Scalar aggregates (Mean)
+        metrics[f"{prefix}T2Gap"] = gaps[mask].mean().item()
+        metrics[f"{prefix}Conf"] = confs[mask].mean().item()
+        
+        if bit_correct_vec is not None:
+            metrics[f"{prefix}BitAcc"] = bit_correct_vec[mask].mean().item()
+            
+        # Compute Expensive stats (DecAcc, ECE, BalAcc)
+        # Note: We pass the filtered tensors
+        subset_stats = _compute_vectorized_stats(
+            preds=idx_pred[mask], 
+            targets=targets[mask], 
+            confs=confs[mask], 
+            num_classes=num_classes,
+            n_bins=10
+        )
+        
+        # Add prefix
+        for k, v in subset_stats.items():
+            metrics[f"{prefix}{k}"] = v
+
+    # --- Compute Global & Bands ---
+    
+    # Global
+    _calc_subset(torch.ones_like(targets, dtype=torch.bool), "glob_")
+    
+    # Per Band
+    for (low, high) in bands:
+        mask = (target_dist_km >= low) & (target_dist_km < high)
+        if mask.any():
+            band_name = f"b{low}-{high if high != float('inf') else 'inf'}_"
+            _calc_subset(mask, band_name)
     
     return metrics
 

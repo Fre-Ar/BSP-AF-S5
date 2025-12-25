@@ -413,7 +413,6 @@ def make_dataset_parallel(
     # -----------------------------------------------------
     # 1) Draw points (parent process only; no labeling here)
     # -----------------------------------------------------
-    # TODO: make it work with log1p_dist
     t0 = time.perf_counter()
     # create sampler
     sampler_for_drawing = BorderSampler(

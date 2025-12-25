@@ -9,7 +9,9 @@ from nirs.create_nirs import get_model_path
 
 from utils.utils_geo import COUNTRIES_ECOC_PATH, TRAINING_DATA_PATH, CHECKPOINT_PATH
 
-MODEL = "siren"
+MODEL = "incode"
+INIT_REGIME = "siren"
+ENCODING = None
 MODE = "ecoc" 
 DEPTH = 5
 LAYER = 512
@@ -19,7 +21,7 @@ W0 = 30.0
 WH = 1.0
 S = 1.0
 BETA = 1.0
-GLOBAL_Z = True # False enables RFF latent Z code
+GLOBAL_Z = False # False enables RFF latent Z code
 REG_HYPER = True
 
 TRAINING_POINTS = 1_000_000
@@ -48,6 +50,8 @@ def train():
         #lr=3e-4,
         
         model_name=MODEL,
+        init_regime=INIT_REGIME,
+        encoding=ENCODING,
         layer_counts=LAYER_COUNTS,
         
         label_mode=MODE,

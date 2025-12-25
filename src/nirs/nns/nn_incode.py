@@ -16,20 +16,28 @@ class Harmonizer(nn.Module):
     Small MLP with SiLU. Neutral output init so (a,b,c,d)=(1,1,0,0) at start.
     If per_layer=True, outputs shape (B, L, 4); else (B, 4).
     '''
-    def __init__(self, in_dim: int, hidden: int = 64, n_layers: int = 5, per_layer: bool = True):
+    def __init__(self, in_dim: int = 64, hidden_dims: int = [64,32], composer_layers: int = 5, per_layer: bool = True):
         super().__init__()
         self.per_layer = bool(per_layer)
-        self.n_layers = int(n_layers)
-        out_dim = 4 * self.n_layers if self.per_layer else 4
-
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden),
-            nn.SiLU(),
-            nn.Linear(hidden, out_dim),
-        )
+        self.composer_layers = int(composer_layers)
+        out_dim = 4 * self.composer_layers if self.per_layer else 4
+        
+        # Build MLP dynamically based on hidden_dims list
+        layers = []
+        current_dim = in_dim
+        
+        # Hidden Layers
+        for h_dim in hidden_dims:
+            layers.append(nn.Linear(current_dim, h_dim))
+            layers.append(nn.SiLU()) 
+            current_dim = h_dim
+            
+        # Final Layer
+        layers.append(nn.Linear(current_dim, out_dim))
+        
+        self.net = nn.Sequential(*layers)
         self._init_weights()
 
-    # TODO: Change weights such that the last bias is 0.31, not first
     def _init_weights(self):
         with torch.no_grad():
             for m in self.net.modules():
@@ -37,25 +45,22 @@ class Harmonizer(nn.Module):
                     m.weight.normal_(0.0, 1e-3)
                     m.bias.fill_(0.31)      # hidden bias mild positive
             # last linear → neutral outputs
-            last = [m for m in self.net.modules() if isinstance(m, nn.Linear)][-1]
-            last.bias.zero_()              # => log a=0, log b=0, c=0, d=0
+            # TODO: check if including old code is worse/better than keeping it out
+            #last = [m for m in self.net.modules() if isinstance(m, nn.Linear)][-1]
+            #last.bias.zero_()              # => log a=0, log b=0, c=0, d=0
 
-    def forward(self, f: torch.Tensor):
-        raw = self.net(f)                                       # (B, out_dim)
+    def forward(self, z: torch.Tensor):
+        raw = self.net(z)                                       # (B, out_dim)
+        
         if self.per_layer:
             B = raw.shape[0]
-            raw = raw.view(B, self.n_layers, 4)                 # (B, L, 4)
-            a = torch.exp(raw[..., 0])
-            b = torch.exp(raw[..., 1])
-            c = raw[..., 2]
-            d = raw[..., 3]
-            return a, b, c, d                                   # each (B, L)
-        else:
-            a = torch.exp(raw[..., 0])
-            b = torch.exp(raw[..., 1])
-            c = raw[..., 2]
-            d = raw[..., 3]
-            return (a, b, c, d)                                 # each (B,)
+            raw = raw.view(B, self.composer_layers, 4) # (B, L, 4)
+
+        a = torch.exp(raw[..., 0])
+        b = torch.exp(raw[..., 1])
+        c = raw[..., 2]
+        d = raw[..., 3]
+        return (a, b, c, d)                                 # each (B,)
 
 # ---------------------------
 # SIREN-like trunk with per-layer modulation
@@ -131,11 +136,10 @@ class INCODE_NIR(nn.Module):
                  w0_first: float = 30.0,
                  w0_hidden: float = 1.0,    
                  # x-conditioning features
-                 # TODO: the latent code size will be bigger than 64 if rff_m = 64
-                 rff_m: int = 64,
-                 rff_sigma: float = 1.0,
+                 rff_m: int = 32, # RFF with m=32 gives us a harmonizer in_dim = 64
+                 rff_sigma: float = 1.0, # TODO: play with this value in [1.0,3.0]
                  # harmonizer
-                 harmonizer_hidden: int = 64,
+                 harmonizer_hidden_dims: int = [64,32],
                  per_layer: bool = False,
                  # Latent code global z
                  learn_global_z: bool = False,
@@ -161,8 +165,8 @@ class INCODE_NIR(nn.Module):
         self.trunk = INCODETrunk(in_dim=in_dim, layer_counts=layer_counts,
                                  w0_first=w0_first, w0_hidden=w0_hidden, bias=bias)
         self.harmonizer = Harmonizer(in_dim=harmonizer_in_dim,
-                                     hidden=harmonizer_hidden,
-                                     n_layers=len(layer_counts),
+                                     hidden_dims=harmonizer_hidden_dims,
+                                     composer_layers=len(layer_counts),
                                      per_layer=per_layer)
 
         # Heads

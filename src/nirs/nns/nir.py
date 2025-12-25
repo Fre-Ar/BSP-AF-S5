@@ -12,11 +12,12 @@ from .fourier_features import EncodingBase
 
 
 class NIRLayer(nn.Module):
-    def __init__(self, activation: nn.Module, in_dim: int, out_dim: int, ith_layer: int, bias=True, complex=False):
+    def __init__(self, activation: nn.Module, in_dim: int, out_dim: int, ith_layer: int, bias=True, complex=False, is_last=False):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
         self.ith_layer = ith_layer
+        self.is_last = is_last
         self.complex = complex
         dtype = torch.cfloat if complex else torch.get_default_dtype()
         self.linear = nn.Linear(in_dim, out_dim, bias=bias, dtype=dtype)
@@ -26,8 +27,7 @@ class NIRLayer(nn.Module):
         if self.complex and (not torch.is_complex(x)):
             x = x.to(torch.cfloat)
         y = self.activation(self.linear(x))
-        # TODO: Better check for last layer
-        if self.complex and self.ith_layer < 0:
+        if self.complex and self.is_last < 0:
             y = y.real
         return y
 
@@ -52,7 +52,7 @@ class NIRTrunk(nn.Module):
         
         layers += [layer(first_in, layer_counts[0], params=params[0], ith_layer=0)]
         for i in range(1, depth):
-            layers += [layer(layer_counts[i-1], layer_counts[i], params=params[i], ith_layer=i)]
+            layers += [layer(layer_counts[i-1], layer_counts[i], params=params[i], ith_layer=i, is_last=(i==depth-1))]
         self.net = nn.Sequential(*layers)
 
     def forward(self, x): 
