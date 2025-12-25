@@ -46,52 +46,37 @@ def compute_potential_ecoc_pos_weights(
 
     return pw_c1, pw_c2
 
-def load_model_and_codebook(
-    checkpoint_path: str,
-    model_name: str,
-    layer_counts,
-    w0: float,
-    w_hidden: float,
-    s_param: float,
-    beta: float,
-    global_z: bool,
-    label_mode: LabelMode = "ecoc",
-    codes_path: str | None = None,
-    device:  str | None  = None
-):
-    # resolve device
-    device = device if device else get_default_device()
-    
-    # ---- load checkpoint & config ----
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
-    cfg = ckpt.get("config", {})
-    
-    if label_mode not in {"ecoc", "softmax"}:
-        raise ValueError(f"label_mode must be 'auto'|'ecoc'|'softmax', got {label_mode}")
 
-    # ---- build & load model ----
-    model, _ = build_model(
-        model_name,
-        layer_counts,
-        label_mode,
-        (w0, w_hidden, s_param, beta, global_z),
-    )
-    model.to(device)
-    model.load_state_dict(ckpt["model"])
+# -------------------------------------------------------------------
+# Learnable hyperparameter inspection (INCODE a,b,c,d sanity check)
+# -------------------------------------------------------------------
+def summarize_abcd(a, b, c, d, label=""):
+    """
+    Prints simple summary stats (mean/std/min/max) for four tensors a,b,c,d.
+
+    Useful for checking that INCODE hyperparameters don't explode or collapse.
+    """
+    def s(t):
+        return dict(mean=float(t.mean()), std=float(t.std()),
+                    min=float(t.min()), max=float(t.max()))
+    print(f"[{label}] a={s(a)}")
+    print(f"[{label}] b={s(b)}")
+    print(f"[{label}] c={s(c)}")
+    print(f"[{label}] d={s(d)}")
+
+@torch.no_grad()
+def check_abcd(model, x_batch):
+    """
+    Runs a single forward pass with `return_abcd=True` and print stats for (a,b,c,d).
+
+    Assumes model(x, return_abcd=True) -> (dist, c1, c2, (a,b,c,d)).
+    """
     model.eval()
-
-    codebook = None
-    if label_mode == "ecoc":
-        if codes_path is None:
-            raise ValueError("ECOC mode requires codes_path to the ECOC JSON codebook.")
-        codebook = load_ecoc_codes(codes_path)
-        
-    first_param = next(model.parameters()).detach().flatten()
-
-        
-    return model, device, codebook, ckpt
-
-
+    if x_batch.dim() == 1: 
+        x_batch = x_batch.unsqueeze(0)
+    dist, c1, c2, (a,b,c,d) = model(x_batch, return_abcd=True)
+    summarize_abcd(a, b, c, d, label=f"B={x_batch.size(0)}")
+    return a, b, c, d
 
 class Predictor:
     """
@@ -106,26 +91,26 @@ class Predictor:
         print(f"[Predictor] Loading {cfg.model_name} from {checkpoint_path}...")
         
         # 1. Load Model & Codebook
-        # We reuse the engine logic to ensure consistency with training
-        self.model, self.device, self.codebook, self.ckpt = load_model_and_codebook(
-            checkpoint_path=checkpoint_path,
-            model_name=cfg.model_name,
-            layer_counts=cfg.layer_counts,
-            w0=cfg.w0,
-            w_hidden=cfg.w_hidden,
-            s_param=cfg.s,
-            beta=cfg.beta,
-            global_z=cfg.global_z,
-            label_mode=cfg.label_mode,
-            codes_path=cfg.codes_path,
-            device=self.device
-        )
+        
+        # ---- load checkpoint & config ----
+        self.ckpt = torch.load(checkpoint_path, map_location="cpu")
+        
+        # ---- build & load model ----
+        self.model, _ = build_model(model_cfg=cfg)
+        self.model.to(self.device)
+        self.model.load_state_dict(self.ckpt["model"])
         self.model.eval()
+
+        self.codebook = None
+        if cfg.label_mode == "ecoc":
+            if cfg.codes_path is None:
+                raise ValueError("ECOC mode requires codes_path to the ECOC JSON codebook.")
+            self.codebook = load_ecoc_codes(cfg.codes_path)
         
         # 2. Prepare Codebook Tensors (for ECOC decoding)
         if self.cfg.label_mode == "ecoc":
             self.class_ids, self.codes_mat = _prepare_codebook_tensor(
-                self.codebook, self.device, torch.float32
+                self.codebook, self.device
             )
             
             # 3. Recover Position Weights from Checkpoint (for Soft ECOC consistency)
@@ -145,15 +130,11 @@ class Predictor:
             self.pw_c1 = None
             self.pw_c2 = None
 
-    def _forward_model(self, x: torch.Tensor):
+    def _forward_model(self, x: torch.Tensor, check_abcd: bool = False):
         """Unified forward pass handling model-specific signatures (e.g. INCODE)."""
-        if self.cfg.model_name.lower() == "incode":
-            # INCODE returns (dist, c1, c2, reg_params)
-            out = self.model(x, self.cfg.regularize_hyperparams)
-            return out[0], out[1], out[2]
-        else:
-            # Standard return (dist, c1, c2)
-            return self.model(x)
+        if self.cfg.model_name.lower() == "incode" and check_abcd:
+            check_abcd(self.model, x)
+        return self.model(x)
 
     @torch.no_grad()
     def predict(self, xyz: Union[np.ndarray, torch.Tensor], tau: float = 1.0) -> Prediction:
@@ -172,7 +153,7 @@ class Predictor:
             x_t = torch.from_numpy(xyz).to(self.device, dtype=torch.float32)
         else:
             x_t = xyz.to(self.device, dtype=torch.float32)
-            
+        
         # 2. Forward Pass
         pred_log1p, c1_logits, c2_logits = self._forward_model(x_t)
         

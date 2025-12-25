@@ -10,12 +10,12 @@ from PIL import Image
 import math
 
 
-from geodata.ecoc.ecoc import load_ecoc_codes, ecoc_decode, _ecoc_decode_soft_old, _codebook_to_bits_matrix_local, _prepare_codebook_tensor
+from geodata.ecoc.ecoc import ecoc_decode, _ecoc_decode_soft_old, _codebook_to_bits_matrix_local, _prepare_codebook_tensor
 
 from nirs.world_bank_country_colors import colors_important
-from nirs.create_nirs import build_model
 from nirs.viz.visualizer import _hash_colors  
-from nirs.engine import load_model_and_codebook
+from nirs.engine import Predictor
+from nirs.inference import InferenceConfig
 
 from utils.utils_geo import (
     COUNTRIES_ECOC_PATH,
@@ -198,16 +198,7 @@ def _colorize_ids_with_overrides(
 def rasterize_model_from_checkpoint(
     # model params
     checkpoint_path: str,
-    model_name: str,
-    layer_counts,
-    depth: int, layer: int,
-    w0: float, w_h: float, s_param: float, beta: float,
-    global_z: bool,
-    regularize_hyperparams: bool,
-    
-    # labels / decoding
-    label_mode: str = "ecoc",             # "auto" | "ecoc" | "softmax"
-    codes_path: Optional[str] = None,     # required for ECOC
+    model_cfg: InferenceConfig,
     
     # bbox & resolution
     lon_min: float = -180, lon_max: float = 180,
@@ -217,7 +208,6 @@ def rasterize_model_from_checkpoint(
     # what to render
     render: Literal["c1", "c2", "distance"] = "c1",
     tau: float = 1.0,                     # temperature for ECOC logits
-    model_outputs_log1p: bool = True,     # if True, distance head outputs log1p(km)
     distance_clip_km: Tuple[float, float] = (0.0, 500.0),
     
     # execution
@@ -226,7 +216,7 @@ def rasterize_model_from_checkpoint(
     
     # colors
     overrides: Dict[int, str] | None = None,  # ids -> hex / mpl color
-    opacity: float = 0.95,
+    opacity: float = 1.0,
 ) -> Tuple[np.ndarray, dict]:
     """
     Runs a trained NIR checkpoint over a lon/lat grid and rasterize either:
@@ -275,177 +265,52 @@ def rasterize_model_from_checkpoint(
     aux : dict
         Metadata: bbox, resolution, effective label_mode, tau, etc.
     """
-    # load model and codebook from checkpoint
-    model, device, codebook, ckpt = load_model_and_codebook(
-        checkpoint_path=checkpoint_path,
-        model_name=model_name,
-        layer_counts=layer_counts,
-        
-        w0=w0,
-        w_hidden=w_h,
-        s_param=s_param,
-        beta=beta,
-        global_z=global_z,
-        
-        label_mode=label_mode,
-        codes_path=codes_path,
-        device=device)
-    
-    class_ids, codes_mat = _prepare_codebook_tensor(codebook, device, torch.float32)  # codes: [C,K]
-    
-    cfg = ckpt.get("config", {})
-    pw_c1, pw_c2 = cfg.get("pos_weight_c1", None), cfg.get("pos_weight_c2", None)
-    
-    # ---- ECOC bits (old-style) ----
-    ids_np: Optional[np.ndarray] = None
-    bits_t: Optional[torch.Tensor] = None
-    if label_mode == "ecoc":
-        n_bits = int(cfg.get("n_bits", 32))
-        ids_np, bits_t = _codebook_to_bits_matrix_local(codebook, n_bits=n_bits)
-        bits_t = bits_t.to(device)
-    
-    # build lon/lat grid and unit vectors
-    lon2d, lat2d = make_lonlat_grid(
-        lon_min=lon_min, lon_max=lon_max,
-        lat_min=lat_min, lat_max=lat_max,
-        width=width,     height=height,
-        lat_sampling="linear"
-    )
-    xyz = lonlat_to_unitvec(lon2d, lat2d).reshape(-1, 3).astype(np.float32)  # (N,3)
-    N = xyz.shape[0]
+    # 1. Load model from checkpoint
+    predictor = Predictor(model_cfg, checkpoint_path, device)
 
+    # 2. Build Grid
+    lon2d, lat2d = make_lonlat_grid(
+        lon_min, lon_max, lat_min, lat_max, width, height, "linear"
+    )
+    # Flatten to list of unit vectors
+    xyz = lonlat_to_unitvec(lon2d, lat2d).reshape(-1, 3).astype(np.float32)
+    N = xyz.shape[0]
     out_rgba = np.zeros((N, 4), dtype=np.uint8)
 
-    debug = False
-    if debug:
-        # --- debug: probe a single point from the grid ---
-        debug_lon_val = lon_max
-        debug_lat_val = lat_min
-
-        # your lonlat_to_xyz / lonlat_to_unitvec only accepts np.ndarray
-        debug_lon = np.array([debug_lon_val], dtype=np.float32)
-        debug_lat = np.array([debug_lat_val], dtype=np.float32)
-
-        debug_xyz = lonlat_to_unitvec(debug_lon, debug_lat).astype(np.float32)  # shape (1,3)
-        print(debug_xyz)
-        point_dbg = np.array([0.0232, 0.0099, 0.0228], dtype=np.float32)
-        print("try", unitvec_to_lonlat(point_dbg))
-        #debug_xyz = np.array([0.0232, 0.0099, 0.0228], dtype=np.float32)
-        u_dbg = torch.from_numpy(debug_xyz).to(device)  # (1,3)
+    # 3. Batched Inference Loop
+    print(f"[Rasterizer] Rendering {N} pixels in batches of {batch_size}...")
+    for s_idx in range(0, N, batch_size):
+        e_idx = min(N, s_idx + batch_size)
+        batch_xyz = xyz[s_idx:e_idx]
         
-        with torch.no_grad():
-            d_hat_dbg, logits_c1_dbg, logits_c2_dbg = model(u_dbg)
-            d_hat_dbg = d_hat_dbg.squeeze(-1)
-
-            if label_mode == "ecoc":
-                # ECOC decode with pos_weight if available
-                if render == "c1":
-                    logits_dbg = logits_c1_dbg / max(1e-6, float(tau))
-                    pw_dbg = torch.tensor(pw_c1, dtype=torch.float32, device=device) if pw_c1 is not None else None
-                else:
-                    logits_dbg = logits_c2_dbg / max(1e-6, float(tau))
-                    pw_dbg = torch.tensor(pw_c2, dtype=torch.float32, device=device) if pw_c2 is not None else None
-                
-                
-                class_id_dbg = ecoc_decode(
-                    logits_dbg,
-                    codebook=codebook,
-                    pos_weight=pw_dbg,
-                    mode="soft",
-                )[0].item()
-            else:
-                # softmax case
-                if render == "c1":
-                    class_id_dbg = int(logits_c1_dbg.argmax(dim=1).item())
-                else:
-                    class_id_dbg = int(logits_c2_dbg.argmax(dim=1).item())
-
-        print(f"DEBUG single-point: lon={debug_lon_val:.4f}, lat={debug_lat_val:.4f}, c1_id={class_id_dbg}")
-        print("DEBUG logits_c1_dbg[:10]:", logits_c1_dbg[0, :10].detach().cpu().numpy())
-
-
-    with torch.no_grad():
-        for s_idx in range(0, N, batch_size):
-            e_idx = min(N, s_idx + batch_size)
-            u = torch.from_numpy(xyz[s_idx:e_idx]).to(device)  # (B,3)
-
-            if s_idx == 0:
-                norms = u.norm(dim=1)
-                print("DEBUG raster norms: min", norms.min().item(),
-                    "max", norms.max().item(),
-                    "mean", norms.mean().item())
-            # Multi-head forward: distance + two class heads
-            
-            pred_log1p, logits_c1, logits_c2 = model(u)
-            pred_log1p = pred_log1p.squeeze(-1)
-            
-            # --- distance-only rendering ---
-            if render == "distance":
-                if model_outputs_log1p:
-                    d_km = torch.expm1(pred_log1p)
-                else:
-                    d_km = pred_log1p
-                    
-                vals = d_km.clamp(min=0).float().cpu().numpy()
-                rgba = _colormap_gray(
-                    vals,
-                    vmin=distance_clip_km[0],
-                    vmax=distance_clip_km[1],
-                    opacity=opacity,
-                )
-                out_rgba[s_idx:e_idx] = rgba
-                continue
-
-            # --- classification rendering (c1 / c2) ---
-            if label_mode == "ecoc":
-                # temperature scaling: logits / tau
-                if render == "c1":
-                    logits = logits_c1 / max(1e-6, float(tau))
-                    pw = torch.tensor(pw_c1, dtype=torch.float32, device=device) if pw_c1 is not None else None
-                else:
-                    logits = logits_c2 / max(1e-6, float(tau))
-                    pw = torch.tensor(pw_c2, dtype=torch.float32, device=device) if pw_c1 is not None else None
-
-                
-                t = '''class_ids_t = ecoc_decode(
-                    logits,
-                    codebook=codebook,
-                    pos_weight=None,
-                    mode="soft",
-                )
-                class_ids = class_ids_t.long().cpu().numpy()'''
-                
-                idxs = _ecoc_decode_soft_old(logits, bits_t, tau).cpu().numpy()
-                class_ids = ids_np[idxs]
-                if s_idx == 0:
-                    unique, counts = np.unique(class_ids, return_counts=True)
-                    print("DEBUG raster first batch unique IDs:", unique[:10], "counts:", counts[:10])
-                    #print("logits_c1[0][:10] =", logits_c1[0, :10].detach().cpu().numpy())
-                
-            
-            else:
-                # softmax: logits_* are (B, C) over contiguous class indices
-                if render == "c1":
-                    class_ids = logits_c1.argmax(dim=1).long().cpu().numpy()
-                else:
-                    class_ids = logits_c2.argmax(dim=1).long().cpu().numpy()
-
-            rgba = _colorize_ids_with_overrides(
-                class_ids.astype(np.int64),
-                opacity=opacity,
-                overrides=overrides,
+        # Predict
+        pred = predictor.predict(batch_xyz, tau=tau)
+        
+        # Colorize based on mode
+        if render == "distance":
+            rgba = _colormap_gray(
+                pred.dist_km, 
+                vmin=distance_clip_km[0], 
+                vmax=distance_clip_km[1], 
+                opacity=opacity
             )
-            out_rgba[s_idx:e_idx] = rgba
-
+        elif render == "c1":
+            rgba = _colorize_ids_with_overrides(pred.c1_ids, opacity, overrides)
+        elif render == "c2":
+            rgba = _colorize_ids_with_overrides(pred.c2_ids, opacity, overrides)
+        else:
+            raise ValueError(f"Unknown render mode: {render}")
+            
+        out_rgba[s_idx:e_idx] = rgba
+    
+    # 4. Reshape
     img = out_rgba.reshape(height, width, 4)
-    aux = dict(
-        lon_min=lon_min, lon_max=lon_max,
-        lat_min=lat_min, lat_max=lat_max,
-        width=width,     height=height,
-        render=render,
-        label_mode=label_mode,
-        tau=tau,
-    )
+    aux = {
+        "lon_min": lon_min, "lon_max": lon_max,
+        "lat_min": lat_min, "lat_max": lat_max,
+        "width": width, "height": height,
+        "render": render, "label_mode": model_cfg.label_mode, "tau": tau
+    }
     return img, aux
 
 # ------------------------ wrappers ------------------------
@@ -467,11 +332,8 @@ def save_png(img_rgba: np.ndarray, path: str):
     # Flip vertically: our grid origin is south, PNG viewers expect north at top.
     Image.fromarray(img_rgba[::-1].copy()).save(path)
 
-def raster(model_name, mode,
-        layer_counts,
-        depth, layer,
-        w0, w_h, s, beta,
-        global_z,regularize_hyperparams,
+def raster(model_cfg: InferenceConfig,
+        checkpoint_path: str,
         render: str = "c1",
         area: str = "alpes"):
     """
@@ -506,25 +368,17 @@ def raster(model_name, mode,
     width = 1920
     height = bbox_height(width, lat_min, lat_max, lon_min, lon_max)
 
-    model_path = f"{CHECKPOINT_PATH}/{model_name}_{mode}_1M_{depth}x{layer}_w0{w0}_wh{w_h}.pt" 
     img, aux = rasterize_model_from_checkpoint(
-        model_name=model_name,
-        checkpoint_path=model_path,
-        label_mode=mode,
-        codes_path=COUNTRIES_ECOC_PATH,
-        render=render,
-        tau=1.0,
-        width=width, height=height,
-        overrides=colors_important,  
-        opacity=1.0
-        ,lon_min=lon_min, lon_max=lon_max, lat_min=lat_min, lat_max=lat_max,
+        checkpoint_path=checkpoint_path,
+        model_cfg=model_cfg,
         
-        layer_counts = layer_counts,
-        depth = depth, layer = layer,
-        w0=w0, w_h=w_h, s_param=s, beta=beta,
-        global_z=global_z,
-        regularize_hyperparams=regularize_hyperparams
+        render=render,
+        overrides=colors_important,
+        
+        width=width, height=height,
+        lon_min=lon_min, lon_max=lon_max, lat_min=lat_min, lat_max=lat_max,
     )
-    path = f"raster/{model_name}_{depth}x{layer}_{render}_map_{area}"
-    save_png(img, f"{path}.png")
-    print(f"Saved to {path}.png")
+    cfg_name = checkpoint_path.split('/')[-1].removesuffix('.pt')
+    out_path = f"raster/{cfg_name}_{render}_map_{area}.png"
+    save_png(img, out_path)
+    print(f"Saved to {out_path}")

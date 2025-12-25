@@ -12,7 +12,7 @@ from utils.utils import get_default_device
 
 from utils.utils_geo import COUNTRIES_ECOC_PATH, TRAINING_DATA_PATH, CHECKPOINT_PATH
 
-MODEL = "incode"
+MODEL = "siren"
 INIT_REGIME = "siren"
 ENCODING = None
 MODE = "ecoc" 
@@ -45,6 +45,11 @@ MODEL_CONFIG = InferenceConfig(
 
 TRAINING_POINTS = 1_000_000
 
+model_path = get_model_path(
+        model_cfg=MODEL_CONFIG,
+        n_training=TRAINING_POINTS,)    
+MODEL_PATH = f"{CHECKPOINT_PATH}/{model_path}" 
+
 def train():
     """
     On MPS:
@@ -73,47 +78,27 @@ def train():
     dt = time.perf_counter() - t0
     print(f"Total training time Elapsed: {dt:.3f}s")
 
-def viz(pred: bool = False):
-    model_path = get_model_path(
-        model_cfg=MODEL_CONFIG,
-        n_training=TRAINING_POINTS,)    
-    model_path = f"{CHECKPOINT_PATH}/{model_path}" 
-    
+def viz(pred: bool = False):  
     compare_parquet_and_model_ecoc(
         parquet_path=os.path.join(TRAINING_DATA_PATH, "log_dataset_1M.parquet"),
         #parquet_path=os.path.join(TRAINING_DATA_PATH, "eval_uniform_1M.parquet"),
         #parquet_path=os.path.join(TRAINING_DATA_PATH, "eval_border_1M.parquet"),
     
-        checkpoint_path=model_path,
-        model_name=MODEL,
-        
-        label_mode=MODE,
-        codes_path=COUNTRIES_ECOC_PATH,
+        checkpoint_path=MODEL_PATH,
+        model_cfg=MODEL_CONFIG,
         
         sample=1_000_000,
-        model_outputs_log1p=True,
-        
         predictions_only=pred,
         
-        overrides={180: "#000000"}, #australia becomes black
-        
-        layer_counts=LAYER_COUNTS,
-        depth=DEPTH,
-        layer=LAYER,
-        w0=W0, w_h=WH, s_param=S, beta=BETA, global_z=GLOBAL_Z,
-        
-        regularize_hyperparams=REG_HYPER)
+        overrides={180: "#000000"} #australia becomes black
+        )
 
 def img():
     t0 = time.perf_counter()
 
-    raster(MODEL,
-        MODE,
-        LAYER_COUNTS,
-        DEPTH,
-        LAYER,
-        W0, WH, S, BETA, GLOBAL_Z,
-        REG_HYPER,
+    raster(
+        model_cfg=MODEL_CONFIG,
+        checkpoint_path=MODEL_PATH,
         render = "c1",
         area="alpes")
     
@@ -122,5 +107,5 @@ def img():
 
 if __name__ == "__main__":
     train()
-    #viz()
+    #viz(True)
     #img()

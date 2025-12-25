@@ -29,9 +29,9 @@ class HOSCLayer(NIRLayer):
       - Per the paper, no special 'frequency init' or PE is needed.
       - We use Xavier-normal for weights and zero bias.
     '''
-    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True, adaptive = False):
+    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True, is_last=False, adaptive = False):
         self.beta = params[0]
-        super().__init__(Hosc(self.beta), in_dim, out_dim, ith_layer, bias, adaptive)
+        super().__init__(Hosc(self.beta, adaptive), in_dim, out_dim, ith_layer, bias, is_last=is_last)
         if not adaptive:
             self.register_buffer(f"beta{ith_layer}", torch.tensor(float(self.beta)))
 

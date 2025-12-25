@@ -24,9 +24,9 @@ class WIRELayer(NIRLayer):
         w (float): carrier frequency ω
         s (float): Gaussian window width parameter
     '''
-    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True):
+    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True, is_last=False):
         self.w, self.s = params[0], params[1]
         # Fixed hyperparameters as non-learnable buffers
-        super().__init__(Wire(self.w, self.s), in_dim, out_dim, ith_layer, bias, complex=True)
+        super().__init__(Wire(self.w, self.s), in_dim, out_dim, ith_layer, bias, complex=True, is_last=is_last)
         self.register_buffer(f"w{ith_layer}", torch.tensor(float(self.w)))
         self.register_buffer(f"s{ith_layer}", torch.tensor(float(self.s)))

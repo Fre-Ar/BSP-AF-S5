@@ -33,9 +33,9 @@ class SIRENLayer(NIRLayer):
     Params:
         w (float): frequency multiplier ω.
     '''
-    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True):
+    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True, is_last=False):
         self.w = params[0]
-        super().__init__(Sine(self.w), in_dim, out_dim, ith_layer, bias)
+        super().__init__(Sine(self.w), in_dim, out_dim, ith_layer, bias, is_last=is_last)
         self.register_buffer(f"w{ith_layer}", torch.tensor(float(self.w)))
         init_siren_linear(self.linear, in_dim, ith_layer, w=self.w)
                 

@@ -7,8 +7,8 @@ import os
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from typing import Dict, Optional, Tuple
-from dataclasses import dataclass, field
+from typing import Dict, Optional
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -19,7 +19,7 @@ from torch import cat
 
 from .loss import UncertaintyWeighting
 from .nns.nn_incode import INCODE_NIR as Incode
-from .nns.nir import LabelMode, ClassHeadConfig
+from .nns.nir import ClassHeadConfig
 from .create_nirs import build_model
 from .engine import compute_potential_ecoc_pos_weights
 from .data import make_dataloaders
@@ -28,7 +28,7 @@ from .inference import InferenceConfig
 
 from geodata.ecoc.ecoc import per_bit_threshold, _prepare_codebook_tensor
 from utils.utils import get_default_device, trimf, pretty_tuple
-from utils.utils_geo import COUNTRIES_ECOC_PATH, CHECKPOINT_PATH, TRAINING_LOG_PATH
+from utils.utils_geo import CHECKPOINT_PATH, TRAINING_LOG_PATH
 
 # ===================== CONFIGURATION =====================
 

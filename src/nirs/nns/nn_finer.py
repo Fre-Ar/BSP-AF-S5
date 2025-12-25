@@ -22,10 +22,10 @@ class FINERLayer(NIRLayer):
         w (float): frequency multiplier ω.
 
     '''
-    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True, bias_range_k: float = 5.0):
+    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True, is_last=False, bias_range_k: float = 5.0):
         self.w = params[0]
         self.bias_range_k = float(bias_range_k)
-        super().__init__(Finer(self.w), in_dim, out_dim, ith_layer, bias)
+        super().__init__(Finer(self.w), in_dim, out_dim, ith_layer, bias, is_last=is_last)
         self.register_buffer(f"w{ith_layer}", torch.tensor(float(self.w)))
 
         self.reset_parameters()

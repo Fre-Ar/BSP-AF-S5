@@ -19,10 +19,10 @@ class GAUSSLayer(NIRLayer):
     Params:
         s (float): Gaussian window width parameter
     '''
-    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True):
+    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True, is_last=False):
         # fixed bandwidth hyperparameter (saved in checkpoints but not optimized)
         self.s = params[0]
-        super().__init__(Gauss(self.s), in_dim, out_dim, ith_layer, bias)
+        super().__init__(Gauss(self.s), in_dim, out_dim, ith_layer, bias, is_last=is_last)
         self.register_buffer(f"s{ith_layer}", torch.tensor(float(self.s)))
         self.reset_parameters()
 

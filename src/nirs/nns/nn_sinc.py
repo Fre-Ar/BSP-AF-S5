@@ -21,9 +21,9 @@ class SINCLayer(NIRLayer):
         w (float): scaling factor ω, π by default.
 
     '''
-    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True):
+    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True, is_last=False):
         self.w = params[0]
-        super().__init__(Sinc(self.w), in_dim, out_dim, ith_layer, bias)
+        super().__init__(Sinc(self.w), in_dim, out_dim, ith_layer, bias, is_last=is_last)
         self.register_buffer(f"w{ith_layer}", torch.tensor(float(self.w)))
 
         self.reset_parameters()

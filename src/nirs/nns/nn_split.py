@@ -71,7 +71,7 @@ class SplitNIR(nn.Module):
             # trunk
             layers += [layer(first_in, layer_counts[0], params=params[0], ith_layer=0)]
             for i in range(1, depth):
-                layers += [layer(layer_counts[i-1], layer_counts[i], params=params[i], ith_layer=i)]
+                layers += [layer(layer_counts[i-1], layer_counts[i], params=params[i], ith_layer=i, is_last=(i==depth-1))]
             # head
             layers +=  [nn.Linear(layer_counts[-1], out_dim)]    
             return layers
