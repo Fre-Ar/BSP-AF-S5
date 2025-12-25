@@ -1,218 +1,35 @@
 # src/nirs/training.py
 
-import math, pathlib
-import numpy as np
-from tqdm import tqdm
-from typing import Dict, Optional
-from dataclasses import dataclass
+import math
+import pathlib
+import time
 import os
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+from typing import Dict, Optional, Tuple
+from dataclasses import dataclass, field
 
 import torch
-import torch.nn.functional as F
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader
-
+from torch import cat
 
 from .loss import UncertaintyWeighting
 from .nns.nn_incode import INCODE_NIR as Incode
-from .nns.nir import LabelMode
+from .nns.nir import LabelMode, ClassHeadConfig
 from .create_nirs import build_model
-
-from geodata.ecoc.ecoc import per_bit_threshold, ecoc_decode
-from utils.utils import get_default_device
-from utils.utils_geo import COUNTRIES_ECOC_PATH, CHECKPOINT_PATH
-
 from .engine import compute_potential_ecoc_pos_weights
 from .data import make_dataloaders
+from .metrics import compute_distance_metrics, compute_classification_metrics
 
-# ===================== INTERNAL HELPERS =====================
+from geodata.ecoc.ecoc import per_bit_threshold, _prepare_codebook_tensor
+from utils.utils import get_default_device, trimf, pretty_tuple
+from utils.utils_geo import COUNTRIES_ECOC_PATH, CHECKPOINT_PATH, TRAINING_LOG_PATH
 
-
-def _accumulate_distance_metrics(
-    totals: dict,
-    pred_log1p_dist: torch.Tensor,
-    log1p_dist: torch.Tensor,
-    weight: float,
-) -> None:
-    """
-    Updates running sums for distance metrics in-place.
-
-    totals["mse_sum_log"] accumulates weighted MSE in log1p space,
-    totals["mse_sum"]     accumulates weighted MSE in km space.
-    """
-    totals["mse_sum_log"] += weight * F.mse_loss(
-        pred_log1p_dist, log1p_dist, reduction="sum").float()
-    totals["mse_sum"] += weight * F.mse_loss(
-        torch.expm1(pred_log1p_dist), torch.expm1(log1p_dist), reduction="sum").float()
-
-
-def _forward_model(
-    model: nn.Module,
-    xyz: torch.Tensor,
-    model_name: str,
-    regularize_hyperparams: bool,
-):
-    """
-    Unified forward pass for all NIR models.
-
-    For INCODE, returns:
-      (pred_log1p_dist, c1_logits, c2_logits, (a, b, c, d))
-
-    For all other models, returns:
-      (pred_log1p_dist, c1_logits, c2_logits, None)
-    """
-    # INCODE has a slightly different signature and returns extra hyperparams
-    if model_name.lower() == "incode":
-        output = model( xyz, regularize_hyperparams )
-        if regularize_hyperparams:
-            pred_log1p_dist, c1_logits, c2_logits, reg_params = output
-        else:
-           pred_log1p_dist, c1_logits, c2_logits = output
-           reg_params = None 
-    else:
-        pred_log1p_dist, c1_logits, c2_logits = model(xyz)
-        reg_params = None
-    return pred_log1p_dist, c1_logits, c2_logits, reg_params
-
-
-def _classification_loss(
-    c1_logits: torch.Tensor,
-    c2_logits: torch.Tensor,
-    batch: dict,
-    device: torch.device | str,
-    label_mode: LabelMode,
-    debug_losses: bool,
-    # loss modules for non-debug path (can be None if debug)
-    bce_c1: nn.Module | None,
-    bce_c2: nn.Module | None,
-    ce: nn.Module | None,
-    pos_weight_c1: Tensor | None,
-    pos_weight_c2: Tensor | None,
-):
-    """
-    Computes classification losses for both heads, handling:
-
-      - ECOC vs softmax label mode,
-      - debug vs non-debug behavior.
-
-    Returns
-    -------
-    loss_c1, loss_c2 : scalar tensors
-    c1_loss_vec, c2_loss_vec : per-sample losses or None (if not debug)
-    """
-    if label_mode == "ecoc":
-        c1_bits = batch["c1_bits"].to(device)
-        c2_bits = batch["c2_bits"].to(device)
-
-        if debug_losses:
-            # elementwise BCE: (B, K) -> per-sample mean (B,)
-            c1_elem = F.binary_cross_entropy_with_logits(
-                c1_logits, c1_bits, reduction="none", pos_weight=pos_weight_c1)
-            c2_elem = F.binary_cross_entropy_with_logits(
-                c2_logits, c2_bits, reduction="none", pos_weight=pos_weight_c2)
-            c1_loss_vec = c1_elem.mean(dim=1) # per-sample
-            c2_loss_vec = c2_elem.mean(dim=1) # per-sample
-
-            # scalar losses used for optimization
-            loss_c1 = c1_loss_vec.mean()
-            loss_c2 = c2_loss_vec.mean()
-        else:
-            # Use pre-built BCEWithLogitsLoss modules
-            assert bce_c1 is not None and bce_c2 is not None
-            loss_c1 = bce_c1(c1_logits, c1_bits)
-            loss_c2 = bce_c2(c2_logits, c2_bits)
-            c1_loss_vec = None
-            c2_loss_vec = None
-
-    else:  # softmax
-        c1_idx = batch["c1_idx"].to(device)
-        c2_idx = batch["c2_idx"].to(device)
-
-        if debug_losses:
-            c1_loss_vec = F.cross_entropy(c1_logits, c1_idx, reduction="none")
-            c2_loss_vec = F.cross_entropy(c2_logits, c2_idx, reduction="none")
-
-            # scalar losses used for optimization
-            loss_c1 = c1_loss_vec.mean()
-            loss_c2 = c2_loss_vec.mean()
-        else:
-            assert ce is not None
-            loss_c1 = ce(c1_logits, c1_idx)
-            loss_c2 = ce(c2_logits, c2_idx)
-            c1_loss_vec = None
-            c2_loss_vec = None
-
-    return loss_c1, loss_c2, c1_loss_vec, c2_loss_vec
-
-
-def _update_ecoc_metrics(
-    totals: dict,
-    c1_logits: torch.Tensor,
-    c2_logits: torch.Tensor,
-    batch: dict,
-    device: torch.device | str,
-    pos_weight_c1: Tensor | None,
-    pos_weight_c2: Tensor | None,
-    codebook: Optional[Dict[int, np.ndarray]],
-):
-    """
-    Updates ECOC-related validation metrics:
-
-      - bit-level accuracy (c1_bit_acc / c2_bit_acc),
-      - decoded top-1 accuracy if codebook + class indices are available.
-    """
-    c1_bits = batch["c1_bits"].to(device, non_blocking=True)
-    c2_bits = batch["c2_bits"].to(device, non_blocking=True)
-
-    # Per-bit thresholds consistent with BCE pos_weight
-    thr1 = per_bit_threshold(pos_weight_c1, device, c1_bits.size(1))
-    thr2 = per_bit_threshold(pos_weight_c2, device, c2_bits.size(1))
-
-    p1 = torch.sigmoid(c1_logits)
-    p2 = torch.sigmoid(c2_logits)
-    c1_pred_bits = (p1 > thr1).float()
-    c2_pred_bits = (p2 > thr2).float()
-
-    # Bit Accuracy
-    totals["c1_bits_correct"] += float((c1_pred_bits.eq(c1_bits)).float().sum().item())
-    totals["c2_bits_correct"] += float((c2_pred_bits.eq(c2_bits)).float().sum().item())
-    totals["n_bits_total"] += int(c1_bits.numel() + c2_bits.numel())
-
-    # Decoded top-1 ECOC accuracy (requires codebook and true indices)
-    if codebook is not None:
-        c1_idx_true = batch.get("c1_idx")
-        c2_idx_true = batch.get("c2_idx")
-        if c1_idx_true is not None and c2_idx_true is not None:
-            
-            c1_idx_true = c1_idx_true.to(device, non_blocking=True)
-            c2_idx_true = c2_idx_true.to(device, non_blocking=True)
-
-            c1_idx_pred = ecoc_decode(c1_logits, codebook, pos_weight=pos_weight_c1, mode="soft")
-            c2_idx_pred = ecoc_decode(c2_logits, codebook, pos_weight=pos_weight_c2, mode="soft")
-
-            totals["c1_decoded_top1"] += (c1_idx_pred == c1_idx_true).float().sum().item()
-            totals["c2_decoded_top1"] += (c2_idx_pred == c2_idx_true).float().sum().item()
-
-def _update_softmax_metrics(
-    totals: dict,
-    c1_logits: torch.Tensor,
-    c2_logits: torch.Tensor,
-    batch: dict,
-    device: torch.device | str,
-):
-    """
-    Updates softmax-based top-1 accuracy metrics.
-    """
-    c1_idx = batch["c1_idx"].to(device, non_blocking=True)
-    c2_idx = batch["c2_idx"].to(device, non_blocking=True)
-
-    c1_top1 = c1_logits.argmax(dim=1).eq(c1_idx).float().sum().item()
-    c2_top1 = c2_logits.argmax(dim=1).eq(c2_idx).float().sum().item()
-    totals["c1_top1"] += float(c1_top1)
-    totals["c2_top1"] += float(c2_top1)
-
-# ===================== TRAINING =====================
+# ===================== CONFIGURATION =====================
 
 @dataclass
 class LossWeights:
@@ -220,305 +37,327 @@ class LossWeights:
     w_c1: float = 1.0
     w_c2: float = 1.0
 
-def train_one_epoch(
-    model: nn.Module,
-    model_name: str,
-    loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    
-    device: torch.device | str,
-    
-    lw: LossWeights,
-    pos_weight_c1: Tensor | None = None,
-    pos_weight_c2: Tensor | None = None,
-    
-    label_mode: LabelMode = "ecoc",
-    
-    uw: UncertaintyWeighting | None = None,
-    
-    debug_losses: bool = False,
-    regularize_hyperparams: bool = False
-) -> dict:
-    """
-    Train `model` for one epoch over `loader`.
+# ===================== TRAINER CLASS =====================
 
-    Expected batch format
-    ---------------------
-    Each batch is a dict with at least:
-      - "xyz":        FloatTensor [B, 3]
-      - "log1p_dist": FloatTensor [B, 1]
-      - ECOC mode:
-          "c1_bits": FloatTensor [B, K]
-          "c2_bits": FloatTensor [B, K]
-        Softmax mode:
-          "c1_idx":  LongTensor [B]
-          "c2_idx":  LongTensor [B]
-
-    Model output:
-      model(xyz) -> (pred_log1p_dist, c1_logits, c2_logits)
-      where:
-        pred_log1p_dist : [B, 1]
-        c1_logits, c2_logits : [B, K] for ECOC, or [B, n_classes] for softmax.
-
-    Loss
-    ----
-      L_dist = MSE(pred_log1p_dist, log1p_dist)
-      L_c1   = BCEWithLogits / CE on first head
-      L_c2   = BCEWithLogits / CE on second head
-
-      If `uw` is provided (UncertaintyWeighting), the combined loss is:
-        uw([w_dist * L_dist, w_c1 * L_c1, w_c2 * L_c2])
-      otherwise:
-        w_dist * L_dist + w_c1 * L_c1 + w_c2 * L_c2
-
-      For INCODE models, an additional regularization term
-      `Incode.incode_reg(a, b, c, d)` is added when `regularize_hyperparams=True`.
-
-    Returns
-    -------
-    stats : dict
-      {
-        "loss":        mean total loss,
-        "rmse_km":     RMSE in km,
-        "rmse_log1p":  RMSE in log1p space,
-        "c1_loss":     mean classification loss on head 1,
-        "c2_loss":     mean classification loss on head 2,
-        # plus debug quantiles (c1_p95/c1_max/c2_p95/c2_max) if debug_losses=True
-      }
-    """
-    # -----------------------------------------------------
-    # 1) Initialization
-    # -----------------------------------------------------
-    model.train()
-    totals = {
-        "loss": 0.0,
-        "mse_sum_log": 0.0,
-        "mse_sum": 0.0,
-        "n": 0,
-        "c1_loss": 0.0,
-        "c2_loss": 0.0,
-    }
-    
-    mse = nn.MSELoss(reduction="mean").to(device)
-    
-    if debug_losses:
-        # Track per-sample classification losses for quantiles
-        c1_losses_epoch = []
-        c2_losses_epoch = []
-    else:
-        # Standard batched losses
-        bce_c1 = nn.BCEWithLogitsLoss(reduction="mean", pos_weight=pos_weight_c1).to(device)
-        bce_c2 = nn.BCEWithLogitsLoss(reduction="mean", pos_weight=pos_weight_c2).to(device)
-        ce = nn.CrossEntropyLoss(reduction="mean").to(device)
-    
-    # -----------------------------------------------------
-    # 2) Training
-    # -----------------------------------------------------
-    pbar = tqdm(loader, leave=False) # progress bar
-    for batch in pbar:
-        # 2.1) Gradient Descent
-        xyz       = batch["xyz"].to(device, non_blocking=True)           # (B,3)
-        log1p_dist= batch["log1p_dist"].to(device, non_blocking=True)    # (B,1)
+class Trainer:
+    def __init__(
+        self,
+        model: nn.Module,
+        model_name: str,
+        optimizer: torch.optim.Optimizer,
+        device: torch.device | str,
+        loss_weights: LossWeights,
+        # Data Config
+        class_cfg: ClassHeadConfig,
+        pos_weight_c1: Optional[Tensor] = None,
+        pos_weight_c2: Optional[Tensor] = None,
+        codebook: Optional[Dict[int, np.ndarray]] = None,
+        # Advanced
+        uw: Optional[UncertaintyWeighting] = None,
+        regularize_hyperparams: bool = False
+    ):
+        self.model = model
+        self.model_name = model_name
+        self.optimizer = optimizer
+        self.device = device
+        self.lw = loss_weights
         
-        # TODO: MAKE r_band MATTER
-
-        optimizer.zero_grad(set_to_none=True)
+        self.class_cfg = class_cfg
+        self.pos_weight_c1 = pos_weight_c1.to(device) if pos_weight_c1 is not None else None
+        self.pos_weight_c2 = pos_weight_c2.to(device) if pos_weight_c2 is not None else None
         
-        # forward model
-        pred_log1p_dist, c1_logits, c2_logits, reg_params = _forward_model(
-            model, xyz, model_name, regularize_hyperparams
-        )
         
-        # Distance regression in log1p space
-        loss_dist = mse(pred_log1p_dist, log1p_dist)
+        class_ids, codes_mat = _prepare_codebook_tensor(codebook, device) if codebook else (None, None)
+        self.codes_mat = codes_mat
+        self.class_ids = class_ids
         
-        # Classification loss (ECOC vs softmax, debug vs non-debug)
-        loss_c1, loss_c2, c1_loss_vec, c2_loss_vec = _classification_loss(
-            c1_logits,
-            c2_logits,
-            batch,
-            device,
-            label_mode,
-            debug_losses,
-            bce_c1,
-            bce_c2,
-            ce,
-            pos_weight_c1,
-            pos_weight_c2,
-        )
+        self.uw = uw
+        self.regularize_hyperparams = regularize_hyperparams
+
+        # Pre-instantiate loss functions to avoid re-creation
+        self.mse_loss = nn.MSELoss(reduction="mean").to(device)
+        self.ce_loss = nn.CrossEntropyLoss(reduction="mean").to(device)
         
-        # Combine losses (with optional uncertainty weighting)
-        if uw:
-            loss = uw([lw.w_dist * loss_dist, lw.w_c1 * loss_c1, lw.w_c2 * loss_c2])
-        else:
-            loss = lw.w_dist * loss_dist + lw.w_c1 * loss_c1 + lw.w_c2 * loss_c2
-        
-        # Optional INCODE hyperparam regularization
-        if model_name.lower() == "incode" and regularize_hyperparams:
-            a, b, c, d = reg_params
-            loss += Incode.incode_reg(a,b,c,d)
-        
-        # gradient descent step
-        loss.backward()
-        optimizer.step()
+        # BCE with weights (if provided)
+        self.bce_c1 = nn.BCEWithLogitsLoss(reduction="mean", pos_weight=pos_weight_c1).to(device)
+        self.bce_c2 = nn.BCEWithLogitsLoss(reduction="mean", pos_weight=pos_weight_c2).to(device)
 
-        # 2.2) Accumulate Stats
-        with torch.no_grad():
-            # accumulate stats
-            B = xyz.size(0)
-            totals["loss"] += float(loss.detach()) * B
-            _accumulate_distance_metrics(totals, pred_log1p_dist.detach(), log1p_dist, lw.w_dist)
-            totals["c1_loss"] += float(loss_c1.detach()) * B
-            totals["c2_loss"] += float(loss_c2.detach()) * B
-            totals["n"] += B
+        # Cache thresholds for ECOC evaluation to save compute
+        self.thr1 = None
+        self.thr2 = None
 
-            if debug_losses and c1_loss_vec is not None and c2_loss_vec is not None:
-                # accumulate per-sample classification losses for quantiles (stored on CPU)
-                c1_losses_epoch.append(c1_loss_vec.detach().cpu())
-                c2_losses_epoch.append(c2_loss_vec.detach().cpu())
+    def _get_thresholds(self, n_bits_c1: int, n_bits_c2: int):
+        """Lazy load thresholds once."""
+        if self.thr1 is None:
+            self.thr1 = per_bit_threshold(self.pos_weight_c1, self.device, n_bits_c1)
+        if self.thr2 is None:
+            self.thr2 = per_bit_threshold(self.pos_weight_c2, self.device, n_bits_c2)
+        return self.thr1, self.thr2
 
-            # progress bar printing
-            pbar.set_postfix({
-                "rmse(km)":    (totals["mse_sum"] / max(1, totals["n"])) ** 0.5,
-                "rmse(log1p)": (totals["mse_sum_log"] / max(1, totals["n"])) ** 0.5,
-                "c1_loss/n":   totals["c1_loss"] / max(1, totals["n"]),
-                "c2_loss/n":   totals["c2_loss"] / max(1, totals["n"]),
-            })
-    
-    # debug_loss stats 
-    stats = {}
-    if debug_losses:
-        # Concatenate and compute quantiles/max
-        c1_all = torch.cat(c1_losses_epoch) if len(c1_losses_epoch) else torch.tensor([])
-        c2_all = torch.cat(c2_losses_epoch) if len(c2_losses_epoch) else torch.tensor([])
+    def _forward(self, xyz: Tensor):
+        """
+        Unified forward pass for all NIR models.
 
-        if c1_all.numel() > 0:
-            stats["c1_p95"] = float(torch.quantile(c1_all, 0.95))
-            stats["c1_max"] = float(c1_all.max())
-        if c2_all.numel() > 0:
-            stats["c2_p95"] = float(torch.quantile(c2_all, 0.95))
-            stats["c2_max"] = float(c2_all.max())
-        if stats:
-            print({k: round(v, 6) for k, v in stats.items()})
-    
-    # return stats
-    n = max(1, totals["n"])
-    return {
-        "loss":      totals["loss"] / n,
-        "rmse_km":   math.sqrt(totals["mse_sum"] / n),
-        "rmse_log1p":math.sqrt(totals["mse_sum_log"] / n),
-        "c1_loss":   totals["c1_loss"] / n,
-        "c2_loss":   totals["c2_loss"] / n,
-        **stats,
-    }
+        For INCODE, returns:
+        (pred_log1p_dist, c1_logits, c2_logits, (a, b, c, d))
 
-# ===================== EVALUATION =====================
-
-@torch.no_grad()
-def evaluate(
-    model: nn.Module,
-    model_name: str,
-    loader: DataLoader,
-    device: torch.device | str,
-    lw: LossWeights,
-    pos_weight_c1: Tensor | None = None,
-    pos_weight_c2: Tensor | None = None,
-    label_mode: LabelMode = "ecoc",
-    codebook: Optional[Dict[int, np.ndarray]] = None,
-    uw: UncertaintyWeighting | None = None # unused, kept for API compatability
-):
-    """
-    Validation loop (no grad).
-
-    Expected batch format and model outputs are the same as in `train_one_epoch`.
-
-    Metrics
-    -------
-    Always:
-      - "rmse_km"      : RMSE in km (using lw.w_dist)
-      - "rmse_log1p"   : RMSE in log1p space (using lw.w_dist)
-
-    If label_mode == "ecoc":
-      - "c1_bit_acc"   : fraction of correct bits for c1 head
-      - "c2_bit_acc"   : fraction of correct bits for c2 head
-      - "c1_decoded_acc", "c2_decoded_acc" if `codebook` is provided and
-        the batch includes "c1_idx"/"c2_idx" (decoded ECOC accuracy via `ecoc_decode`).
-
-    If label_mode == "softmax":
-      - "c1_top1", "c2_top1" : top-1 accuracy for each classification head.
-
-    Notes
-    -----
-    - The `uw` argument is currently unused in evaluation; validation is purely
-      based on the underlying per-head losses and ECOC decoding logic.
-    """
-    
-    # -----------------------------------------------------
-    # 1) Initialization
-    # -----------------------------------------------------
-    model.eval()
-    totals = {
-        "mse_sum": 0.0,
-        "mse_sum_log": 0.0,
-        "n": 0,
-        "c1_bits_correct": 0.0,
-        "c2_bits_correct": 0.0,
-        "n_bits_total": 0,
-        "c1_top1": 0.0,
-        "c2_top1": 0.0,
-        "c1_decoded_top1": 0.0,
-        "c2_decoded_top1": 0.0,
-    }
-
-    with torch.no_grad():
-        for batch in loader:
-            xyz     = batch["xyz"].to(device, non_blocking=True)
-            log1p_dist    = batch["log1p_dist"].to(device, non_blocking=True)
-
-            # forward model
-            pred_log1p_dist, c1_logits, c2_logits, _ = _forward_model(
-                model, xyz, model_name=model_name, regularize_hyperparams=False
-            )
-            
-            # Distance Regression
-            _accumulate_distance_metrics(totals, pred_log1p_dist, log1p_dist, lw.w_dist)
-            B = xyz.shape[0]
-            totals["n"] += B
-
-            # Classification metrics
-            if label_mode == "ecoc":
-                _update_ecoc_metrics(
-                    totals,
-                    c1_logits,
-                    c2_logits,
-                    batch,
-                    device,
-                    pos_weight_c1,
-                    pos_weight_c2,
-                    codebook)
+        For all other models, returns:
+        (pred_log1p_dist, c1_logits, c2_logits, None)
+        """
+        # INCODE has a slightly different signature and returns extra hyperparams
+        if self.model_name.lower() == "incode":
+            output = self.model(xyz, self.regularize_hyperparams)
+            if self.regularize_hyperparams:
+                # unpack: (dist, c1, c2, (a,b,c,d))
+                return output[0], output[1], output[2], output[3]
             else:
-                _update_softmax_metrics(totals, c1_logits, c2_logits, batch, device)
+                # unpack: (dist, c1, c2)
+                return output[0], output[1], output[2], None
+        else:
+            # Standard models
+            pred_dist, c1, c2 = self.model(xyz)
+            return pred_dist, c1, c2, None
+        
+    def _compute_losses(self, pred_dist, c1_logits, c2_logits, batch):
+        """
+        Computes losses for all 3 heads, handling ECOC vs softmax label mode.
 
-    # stats constructing and returning
-    n = max(1, totals["n"])
-    out = {
-        "rmse_km": math.sqrt(totals["mse_sum"] / n),
-        "rmse_log1p": math.sqrt(totals["mse_sum_log"] / n),
+        Returns
+        -------
+        loss_dist, loss_c1, loss_c2 : scalar tensors
+        """
+        # Distance Loss (Log space)
+        gt_log1p = batch["log1p_dist"].to(self.device, non_blocking=True)
+        loss_dist = self.mse_loss(pred_dist, gt_log1p)
+
+        # Class Loss
+        if self.class_cfg.class_mode == "ecoc":
+            loss_c1 = self.bce_c1(c1_logits, batch["c1_bits"].to(self.device))
+            loss_c2 = self.bce_c2(c2_logits, batch["c2_bits"].to(self.device))
+        else:
+            loss_c1 = self.ce_loss(c1_logits, batch["c1_idx"].to(self.device))
+            loss_c2 = self.ce_loss(c2_logits, batch["c2_idx"].to(self.device))
+            
+        return loss_dist, loss_c1, loss_c2
+    
+    def train_epoch(self, loader: DataLoader) -> Dict[str, float]:
+        self.model.train()
+        
+        # For debug stats
+        total_loss = 0.0
+        d_loss = 0.0
+        c1_loss = 0.0
+        c2_loss = 0.0
+        sum_grad_norm = 0.0
+        n_batches = 0
+
+        pbar = tqdm(loader, leave=False, desc="Train")
+        for batch in pbar:
+            # 1. Measure Data Loading
+            # Time elapsed since the last loop ended is pure data waiting time
+            xyz = batch["xyz"].to(self.device, non_blocking=True)
+            
+            # 1. Zero Grad
+            self.optimizer.zero_grad(set_to_none=True)
+
+            # 2. Forward
+            pred_log1p, c1_logits, c2_logits, reg_params = self._forward(xyz)
+            
+            # 3. Compute Losses
+            l_dist, l_c1, l_c2 = self._compute_losses(pred_log1p, c1_logits, c2_logits, batch)
+
+            # 4. Weighting
+            if self.uw:
+                loss = self.uw([self.lw.w_dist * l_dist, self.lw.w_c1 * l_c1, self.lw.w_c2 * l_c2])
+            else:
+                loss = (self.lw.w_dist * l_dist) + (self.lw.w_c1 * l_c1) + (self.lw.w_c2 * l_c2)
+
+            if reg_params is not None:
+                # INCODE regularization
+                loss += Incode.incode_reg(*reg_params)
+                
+            # 5. Backward
+            loss.backward()
+
+            # 6. Grad Norm
+            # Compute norm over all parameters with gradients
+            gn = nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=math.inf) 
+            sum_grad_norm += gn.item()
+
+            self.optimizer.step()
+            
+            # 7. Stats 
+            total_loss += loss.item()
+            d_loss += l_dist.item()
+            c1_loss += l_c1.item()
+            c2_loss += l_c2.item()
+            n_batches += 1
+            pbar.set_postfix({
+                "loss": f"{trimf(loss.item(),4)}",
+                "d_loss": f"{trimf(l_dist.item(),4)}",
+                "c1_loss": f"{trimf(l_c1.item(),4)}",
+                "c2_loss": f"{trimf(l_c2.item(),4)}"
+            })
+            
+        inv_n =  1/max(1, n_batches)
+        return {
+            "loss": f"{trimf(total_loss*inv_n,4)}",
+            "d_loss":  f"{trimf(d_loss*inv_n,4)}",
+            "c1_loss": f"{trimf(c1_loss*inv_n,4)}",
+            "c2_loss": f"{trimf(c2_loss*inv_n,4)}",
+            "grad_norm": sum_grad_norm * inv_n
+        }
+
+    @torch.no_grad()
+    def eval_epoch(self, loader: DataLoader) -> Dict[str, float]:
+        self.model.eval()
+        
+        # Collectors (gt = ground truth)
+        all_pred_dist = []
+        all_gt_dist = [] # in km
+        
+        all_c1_logits = []
+        all_c1_gt = []   # ids
+        all_c1_bits = [] # For BitAcc if ECOC
+        
+        all_c2_logits = []
+        all_c2_gt = []
+        all_c2_bits = []
+        
+        for batch in loader:
+            xyz = batch["xyz"].to(self.device, non_blocking=True)
+
+            # Forward
+            pred_log1p, c1_logits, c2_logits, _ = self._forward(xyz)
+            
+            # Move predictions to CPU immediately for storage
+            # Distance
+            all_pred_dist.append(torch.expm1(pred_log1p).cpu())
+            all_gt_dist.append(torch.expm1(batch["log1p_dist"]).cpu())
+            
+            
+            # Classification
+            all_c1_logits.append(c1_logits.cpu())
+            if "c1_idx" in batch: all_c1_gt.append(batch["c1_idx"].cpu())
+            if "c1_bits" in batch: all_c1_bits.append(batch["c1_bits"].cpu())
+            
+            all_c2_logits.append(c2_logits.cpu())
+            if "c2_idx" in batch: all_c2_gt.append(batch["c2_idx"].cpu())
+            if "c2_bits" in batch: all_c2_bits.append(batch["c2_bits"].cpu())
+            
+        
+        # Concatenate on CPU
+        # Optimize
+        pred_d = cat(all_pred_dist)
+        gt_d = cat(all_gt_dist)
+        
+        c1_log = cat(all_c1_logits)
+        c2_log = cat(all_c2_logits)
+        c1_gt = cat(all_c1_gt) if all_c1_gt else None
+        c2_gt = cat(all_c2_gt) if all_c2_gt else None
+        
+        # --- Compute Metrics ---
+        stats = {}
+        
+        # 1. Distance
+        d_metrics = compute_distance_metrics(pred_d.flatten(), gt_d.flatten())
+        stats.update(d_metrics)
+        
+        # 2. Classification C1
+        device_calc = self.device
+        
+        if c1_gt is not None:
+            c1_bits_tensor = cat(all_c1_bits).to(device_calc) if all_c1_bits else None
+            
+            c1_met = compute_classification_metrics(
+                c1_log.to(device_calc), c1_gt.to(device_calc), 
+                self.class_cfg.class_mode, 
+                self.codes_mat,
+                self.class_ids,
+                self.pos_weight_c1,
+                c1_bits_tensor
+            )
+            # Prefix keys
+            for k, v in c1_met.items(): stats[f"c1_{k}"] = v
+            
+        # 3. Classification C2
+        if c2_gt is not None:
+            c2_bits_tensor = cat(all_c2_bits).to(device_calc) if all_c2_bits else None
+            
+            c2_met = compute_classification_metrics(
+                c2_log.to(device_calc), c2_gt.to(device_calc), 
+                self.class_cfg.class_mode, 
+                self.codes_mat,
+                self.class_ids,
+                self.pos_weight_c2,
+                c2_bits_tensor
+            )
+            for k, v in c2_met.items(): stats[f"c2_{k}"] = v
+        
+        return stats
+    
+def setup_logging(
+    out_dir: str | os.PathLike,
+    log_dir: str | os.PathLike,
+    model_path: str,
+    parquet_path: str,
+    num_params: int,
+    
+    model_name: str,
+    layer_counts: tuple,
+    
+    w0: float ,
+    w_hidden: float,
+    s: float,
+    beta: float,
+    k: float,
+    global_z: bool ,
+    regularize_hyperparams: bool,
+    encoder_params: tuple,
+    lr: float,
+    label_mode: str
+):
+    out_path = pathlib.Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    save_path = out_path / model_path
+    
+    log_path = pathlib.Path(log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
+    csv_path = log_path / (save_path.stem + ".csv")
+    
+    hyper_params = [
+        f"ω0={trimf(w0)}",
+        f"ωh={trimf(w_hidden)}",
+        f"s={trimf(s)}",
+        f"β={trimf(beta)}",
+        f"k={trimf(k)}",
+        f"z={'global' if global_z else 'local'}",
+        f"reg={regularize_hyperparams}",
+        
+    ]
+    enc_params = [
+        f"m={trimf(encoder_params[0])}",
+        f"σ={trimf(encoder_params[1])}",
+        f"α={trimf(encoder_params[2])}",
+    ]
+    hyper_params = ';'.join(hyper_params)
+    enc_params = ';'.join(enc_params)
+
+
+    # Static Global Params
+    global_meta = {
+        "model": model_name,
+        "layers": pretty_tuple(layer_counts), 
+        "mode": label_mode,
+        "lr": lr,
+        "params": f"{trimf(num_params*1e-6)}M",
+        "size": f"{trimf(num_params*4e-6)}MB",
+        "hyper_params": hyper_params,
+        "encoder_params": enc_params,
+        "train_set": pathlib.Path(parquet_path).name.replace('.parquet', ''),
     }
     
-    if label_mode == "ecoc":
-        if totals["n_bits_total"] > 0:
-            out["c1_bit_acc"] = totals["c1_bits_correct"] / (totals["n_bits_total"] / 2)
-            out["c2_bit_acc"] = totals["c2_bits_correct"] / (totals["n_bits_total"] / 2)
-        if codebook is not None and n > 0 and totals["c1_decoded_top1"] + totals["c2_decoded_top1"] > 0:
-            out["c1_decoded_acc"] = totals["c1_decoded_top1"] / n
-            out["c2_decoded_acc"] = totals["c2_decoded_top1"] / n
-    
-    else:
-        if n > 0:
-            out["c1_top1"] = totals["c1_top1"] / n
-            out["c2_top1"] = totals["c2_top1"] / n
-    return out
+    return global_meta, save_path, csv_path
 
 # ===================== PUBLIC API =====================
 
@@ -526,8 +365,9 @@ def train_and_eval(
     parquet_path: str,
     codes_path: str | None = COUNTRIES_ECOC_PATH,
     out_dir: str | os.PathLike = CHECKPOINT_PATH,
+    log_dir: str | os.PathLike = TRAINING_LOG_PATH,
     
-    batch_size: int = 8192,#65536,
+    batch_size: int = 8192,
     epochs: int = 10,
     
     model_name: str = "siren",
@@ -537,6 +377,7 @@ def train_and_eval(
     w_hidden: float = 1.0,
     s: float = 1.0,
     beta: float = 1.0,
+    k: float =  20.0,
     global_z: bool = True,
     regularize_hyperparams: bool = False,
     
@@ -546,20 +387,22 @@ def train_and_eval(
     loss_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
     use_uncertainty_loss_weighting: bool = False,
     
+    val_lambda = 50,
+    
     label_mode: str = "ecoc",
     
     device: str | None = None,
-    
-    debug_losses: bool = False,
-    head_layers: tuple = (),
+    head_layers: tuple = ()
 ):
     """
     Trains and evaluates a NIR architecture, saving the best out of all into a checkpoint.
     """
-    device = get_default_device()
+    if device is None:
+        device = get_default_device()
     print(f"Training on device: {device}")
 
-    # ------------------ Model ------------------
+    t0 = time.perf_counter()
+    # 1. Build Model
     model, model_path = build_model(
         model_name, 
         layer_counts,
@@ -569,104 +412,113 @@ def train_and_eval(
         regularize_hyperparams=regularize_hyperparams)
     model = model.to(device)
 
+    # 2. Uncertainty Weighting
     uw = UncertaintyWeighting().to(device) if use_uncertainty_loss_weighting else None
 
-    # ------------------ Data ------------------
+    # 3. Data Loaders
     train_loader, val_loader, class_cfg, codebook = make_dataloaders(
         parquet_path=parquet_path,
         label_mode=label_mode,
         codes_path=codes_path,
         split=(0.9, 0.1),
         batch_size=batch_size,
+        codebook=None,
+        device=device
     )
 
-    # ------------------ Optimizer ------------------
+    # 4. Optimizer
+    params = [{"params": model.parameters()}]
     if uw is not None:
-        opt = torch.optim.AdamW(
-            [
-                {"params": model.parameters()},
-                {"params": uw.parameters(), "weight_decay": 0.0},
-            ],
-            lr=lr,
-        )
-    else:
-        opt = torch.optim.Adam(model.parameters(), lr=lr)
-
-    lw = LossWeights(*loss_weights)
-
-    # ------------------ ECOC pos_weights ------------------
+        params.append({"params": uw.parameters(), "weight_decay": 0.0})
+    
+    opt = torch.optim.AdamW(params, lr=lr)
+    
+    # 5. ECOC pos Weights 
     pw_c1, pw_c2 = compute_potential_ecoc_pos_weights(parquet_path, codebook, label_mode)
+    
+    # 6. Trainer Instance
+    trainer = Trainer(
+        model=model,
+        model_name=model_name,
+        optimizer=opt,
+        device=device,
+        loss_weights=LossWeights(*loss_weights),
+        class_cfg=class_cfg,
+        pos_weight_c1=pw_c1,
+        pos_weight_c2=pw_c2,
+        codebook=codebook,
+        uw=uw,
+        regularize_hyperparams=regularize_hyperparams
+    )
 
-    # ------------------ Training loop ------------------
+    # 7. Logging Setup
+    num_params = sum(p.numel() for p in model.parameters())
+    
+    global_meta, save_path, csv_path = setup_logging(
+        out_dir,log_dir,model_path,parquet_path,num_params,model_name,layer_counts,
+        w0,w_hidden,s,beta,k,global_z,regularize_hyperparams,encoder_params,lr,label_mode)
+
+    history = []
     best_score = math.inf
+    
+    dt = time.perf_counter() - t0
+    print(f"Total Setup Time: {dt:.3f}s")
+    start_time = time.perf_counter()
 
+    
+    print(f"Start Training: {model_name} | {pretty_tuple(layer_counts)} | {label_mode}")
+    
+    # 8. Training Loop
     for ep in range(1, epochs + 1):
-        tr = train_one_epoch(
-            model=model,
-            model_name=model_name,
-            
-            loader=train_loader,
-            optimizer=opt,
-            device=device,
-            
-            lw=lw,
-            
-            pos_weight_c1=pw_c1,
-            pos_weight_c2=pw_c2,
-            label_mode=class_cfg.class_mode,
-            
-            uw=uw,
-            debug_losses=debug_losses,
-            
-            regularize_hyperparams=regularize_hyperparams)
+        t0 = time.perf_counter()
+        tr_stats = trainer.train_epoch(train_loader)
+        val_stats = trainer.eval_epoch(val_loader)
+        epoch_time = time.perf_counter() - t0
+        
+        # --- Checkpoint Score ---
+        rmse = val_stats.get("glob_RMSE")
+        acc_c1 = val_stats.get("c1_BalAcc", val_stats.get("c1_DecAcc", 0.0))
+        acc_c2 = val_stats.get("c2_BalAcc", val_stats.get("c2_DecAcc", 0.0))
+        
+        val_score = rmse + val_lambda * ((1.0 - acc_c1) + (1.0 - acc_c2))
+        
+        # --- Record ---
+        row = {
+            "epoch": ep, 
+            "time_ep": epoch_time, 
+            "val_score": val_score,
+            **global_meta
+        }
+        # Flatten stats with prefixes
+        for k,v in tr_stats.items(): row[f"train_{k}"] = v
+        for k,v in val_stats.items(): row[f"val_{k}"] = v
+        
+        history.append(row)
+        # Incremental Save (Prevents data loss if crash)
+        pd.DataFrame(history).to_csv(csv_path, index=False)
+        
+        # --- Print ---
+        # Concise print
+        print(f"[{ep:02d}] T:{tr_stats['loss']} | V_RMSE:{trimf(rmse)} | V_BalAcc:{trimf(acc_c1,2)}/{trimf(acc_c2,2)} | Score:{trimf(val_score)}")
 
-        va = evaluate(
-            model=model,
-            model_name=model_name,
-            loader=val_loader,
-            device=device,
-            lw=lw,
-            pos_weight_c1=pw_c1,
-            pos_weight_c2=pw_c2,
-            label_mode=class_cfg.class_mode,
-            codebook=codebook)
-
-        print(f"[{ep:02d}] train: {tr}  |  val: {va}")
-
-        # Combined score = rmse_km + classification penalty
-        val_score = va["rmse_km"]
-        if label_mode == "ecoc" and "c1_decoded_acc" in va and "c2_decoded_acc" in va:
-            val_score += (1.0 - va["c1_decoded_acc"]) + (1.0 - va["c2_decoded_acc"])
-        elif label_mode == "softmax" and "c1_top1" in va and "c2_top1" in va:
-            val_score += (1.0 - va["c1_top1"]) + (1.0 - va["c2_top1"])
-
+        # --- Save ---
         if val_score < best_score:
             best_score = val_score
-            ckpt = {
+            print(f"    ★ Saved Best: {save_path.name}")
+            torch.save({
                 "model": model.state_dict(),
-                "uw": uw.state_dict() if uw is not None else 1.0,
                 "config": {
-                    "label_mode": class_cfg.class_mode,
+                    **global_meta,
                     "n_bits": getattr(class_cfg, "n_bits", None),
                     "n_classes_c1": getattr(class_cfg, "n_classes_c1", None),
                     "n_classes_c2": getattr(class_cfg, "n_classes_c2", None),
-                    "layers": layer_counts,
-                    "w0": w0,
-                    "w_hidden": w_hidden,
-                    "s": s,
-                    "beta": beta,
-                    "global_z": global_z,
-                    "encoder_params": encoder_params,
-                    "epochs": epochs,
                     "pos_weight_c1": pw_c1.cpu().tolist() if pw_c1 is not None else None,
                     "pos_weight_c2": pw_c2.cpu().tolist() if pw_c2 is not None else None,
+                    "uw": uw.state_dict() if uw is not None else 1.0,
                 },
-            }
+                "epoch": ep
+            }, save_path)
+    
+    total_time = time.perf_counter() - start_time
+    print(f"Done. Total Time: {total_time:.1f}s")
             
-            out_path = pathlib.Path(out_dir)
-            out_path.mkdir(parents=True, exist_ok=True)
-            
-            save_path = out_path / model_path
-            
-            torch.save(ckpt, save_path)
-            print(f"  ↳ saved checkpoint: {save_path}")

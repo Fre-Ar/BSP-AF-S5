@@ -5,6 +5,7 @@ import os
 import json
 import pyarrow as pa, pyarrow.parquet as pq
 import torch
+from itertools import groupby
 
 # --------------------------- math -------------------------
 
@@ -120,6 +121,9 @@ def write_json(out: str, dictionary: dict, name = ""):
    
 # --------------------- Pretty Strings ----------------------------
 
+def trimf(f: float, dec: int = 3):
+    return f"{f:.{dec}f}".rstrip('0').rstrip('.')
+
 def human_int(n: int) -> str:
     """
     Converts an integer into a compact human-readable string.
@@ -145,3 +149,19 @@ def human_int(n: int) -> str:
         if abs(n) >= factor:
             return f"{int(n // factor)}{suffix}"
     return str(n)
+
+
+def pretty_tuple(tup: tuple) -> str:
+    """
+    Compresses a tuple into a pretty string with repeat counts.
+    Example: (512, 512, 512, 128) -> "(3x512, 128)"
+    """
+    parts = []
+    for value, group in groupby(tup):
+        count = sum(1 for _ in group)
+        if count > 1:
+            parts.append(f"{count}x{value}")
+        else:
+            parts.append(str(value))
+            
+    return "(" + ", ".join(parts) + ")"

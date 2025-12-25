@@ -72,7 +72,8 @@ class BordersParquet(Dataset):
         codebook:  Optional[Dict[int, np.ndarray]] = None,
         label_mode: LabelMode = "ecoc",
         
-        drop_cols: Tuple[str, ...] = ("lon", "lat", "is_border")
+        drop_cols: Tuple[str, ...] = ("lon", "lat", "is_border"),
+        device=None
     ):
         super().__init__()
         assert abs(sum(split_frac) - 1.0) < 1e-6, "split_frac must sum to 1"
@@ -135,6 +136,17 @@ class BordersParquet(Dataset):
         
         self.c1_id = torch.as_tensor(c1_id, dtype=torch.long)
         self.c2_id = torch.as_tensor(c2_id, dtype=torch.long)
+        
+        if device is not None:
+            self.xyz = self.xyz.to(device)
+            self.dist = self.dist.to(device)
+            self.log1p_dist = self.log1p_dist.to(device)
+            self.r_band = self.r_band.to(device)
+            self.c1_id = self.c1_id.to(device)
+            self.c2_id = self.c2_id.to(device)
+            if self.label_mode == "ecoc":
+                self.c1_bits = self.c1_bits.to(device)
+                self.c2_bits = self.c2_bits.to(device)
 
     def __len__(self) -> int:
         return self.xyz.shape[0]
@@ -153,7 +165,47 @@ class BordersParquet(Dataset):
             item["c2_bits"] = self.c2_bits[i]  # (n_bits,)
         return item
 
+class FastTensorDataLoader:
+    """
+    Custom iterator that slices batches directly from GPU tensors.
+    Replaces standard DataLoader when dataset is already on device.
+    """
+    def __init__(self, dataset: BordersParquet, batch_size: int, shuffle: bool = True):
+        self.ds = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.size = len(dataset)
+        
+    def __iter__(self):
+        # Generate indices on the same device as data (avoid cpu<->gpu transfer)
+        if self.shuffle:
+            indices = torch.randperm(self.size, device=self.ds.xyz.device)
+        else:
+            indices = torch.arange(self.size, device=self.ds.xyz.device)
 
+        # Iterate via slicing
+        for start in range(0, self.size, self.batch_size):
+            end = start + self.batch_size
+            idx = indices[start:end]
+            
+            # Slice Big Tensors -> Batch Tensors (1 Kernel call)
+            batch = {
+                "xyz": self.ds.xyz[idx],
+                "dist": self.ds.dist[idx],
+                "log1p_dist": self.ds.log1p_dist[idx],
+                "r_band": self.ds.r_band[idx],
+                "c1_idx": self.ds.c1_id[idx],
+                "c2_idx": self.ds.c2_id[idx],
+            }
+            
+            if self.ds.label_mode == "ecoc":
+                batch["c1_bits"] = self.ds.c1_bits[idx]
+                batch["c2_bits"] = self.ds.c2_bits[idx]
+                
+            yield batch
+
+    def __len__(self):
+        return (self.size + self.batch_size - 1) // self.batch_size
 
 def make_dataloaders(
     parquet_path: str,
@@ -163,6 +215,7 @@ def make_dataloaders(
     split: Tuple[float, float] = (0.9, 0.1),
     batch_size: int = 8192,
     codebook: dict | None = None,
+    device=None
 ):
     """
     Shared dataset + dataloader construction for training & eval.
@@ -182,14 +235,16 @@ def make_dataloaders(
         split="train",
         split_frac=split,
         codebook=codebook,
-        label_mode=label_mode)
+        label_mode=label_mode,
+        device=device)
     
     val_ds = BordersParquet(
         parquet_path,
         split="val",
         split_frac=split,
         codebook=codebook,
-        label_mode=label_mode)
+        label_mode=label_mode,
+        device=device)
     
     if label_mode == "ecoc":
         bits = len(next(iter(codebook.values())))
@@ -201,28 +256,38 @@ def make_dataloaders(
             class_mode=label_mode,
             n_classes_c1=train_ds.num_classes_c1,
             n_classes_c2=train_ds.num_classes_c2)
-
-    # Detect device (mps, cuda, or cpu)
-    from utils.utils import get_default_device
-    device = get_default_device()
-    use_pin_memory = str(device) in ("cuda")
     
-    # create the dataloaders
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=use_pin_memory,
-        persistent_workers=True
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=use_pin_memory,
-        persistent_workers=True
-    )
+    # 3. Choose Loader Strategy
+    if device is not None:
+        # GPU-Resident Mode: Use Fast Loader
+        train_loader = FastTensorDataLoader(train_ds, batch_size=batch_size, shuffle=True)
+        val_loader = FastTensorDataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    else:
+        # CPU Mode: Use Standard Loader
+        from utils.utils import get_default_device
+        def_device = get_default_device()
+        use_pin_memory = str(def_device) == "cuda"
+        
+        # create the dataloaders
+        workers = 4
+        keep_workers = True
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers= workers,
+            pin_memory=use_pin_memory,
+            persistent_workers=keep_workers
+        )
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers= workers,
+            pin_memory=use_pin_memory,
+            persistent_workers=keep_workers
+        )
+    
+    
     return train_loader, val_loader, class_cfg, codebook
 

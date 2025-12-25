@@ -13,6 +13,8 @@ nn_checkpoints/
 countries/
 raster/
 color_extract.py
+training_old.py
+temp.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -23,3 +25,4 @@ __pycache__/
 .DS_Store
 
 papers/
+logs/

@@ -551,31 +551,25 @@ def _prepare_codebook_tensor(
         dtype=dtype,
         device=device
     )  # [C, K] in {0,1}
+    keys = torch.as_tensor(keys, device=device, dtype=torch.long)
     return keys, codes
 
 
 @torch.no_grad()
 def ecoc_decode(
     bits_logits: torch.Tensor,       # [B, K] pre-sigmoid
-    codebook: Dict[int, np.ndarray], # {class_id: np.array([0/1]*K)}
+    codes_mat: torch.Tensor,         # Pre-converted [C, K] float tensor
+    class_ids: torch.Tensor,         # Pre-converted [C] long tensor
     pos_weight=None,                 # float | 1D tensor[K] | None
-    mode: Literal['soft', 'hard'] = 'soft'
+    mode: Literal['soft', 'hard'] = 'soft',
+    full_return: bool = False
 ):
-    """
-    ECOC decoding consistent with BCEWithLogitsLoss(pos_weight).
-
-    Implements per-bit logit shift: z'_k = z_k - tau_k, tau_k = -log(pos_weight_k).
-    Scores each codeword via summed log-likelihood over bits and returns
-    the argmax class id per sample.
-
-    Returns
-    -------
-    pred_class_ids : LongTensor
-        Shape [B], containing predicted class IDs.
-    """
     """
     Decodes ECOC predictions into class IDs, in a way consistent with
     `BCEWithLogitsLoss(pos_weight=...)`.
+    B: batch size
+    K: number of ECOC bits
+    C: number of classes
 
     Parameters
     ----------
@@ -600,6 +594,8 @@ def ecoc_decode(
           - "hard": thresholded bits + nearest neighbour in Hamming space.
             We threshold per bit via (z_k > tau_k) and choose the codeword
             with minimal Hamming distance.
+    full_return: bool, optional
+        False by default. If True, includes as much information in the return as needed to calculate eval stats.
 
     Returns
     -------
@@ -620,9 +616,12 @@ def ecoc_decode(
     B, K   = bits_logits.shape
 
     # prepare codebook
-    keys, codes = _prepare_codebook_tensor(codebook, device, dtype)  # codes: [C,K]
-    keys_tensor = torch.as_tensor(keys, device=device, dtype=torch.long)
-    C = codes.shape[0]
+    keys = class_ids
+    codes = codes_mat
+    #   codebook: Dict[int, np.ndarray], # {class_id: np.array([0/1]*K)}
+    #   codebook: Optional[Dict[int, np.ndarray]] = None,
+    #_prepare_codebook_tensor(codebook, device, dtype)  # codes: [C,K]
+    C = codes.shape
 
     # Build per-bit shift tau (so decision boundary is at 0)
     if pos_weight is None:
@@ -644,13 +643,32 @@ def ecoc_decode(
         # log-likelihood-based decoding
         z_adj = bits_logits - tau  # [B, K]
 
-        # Broadcast to classes
-        Z = z_adj.unsqueeze(1)          # [B, 1, K]
-        BITS = codes.unsqueeze(0)       # [1, C, K]
-
         # Log-likelihood for each class and sample
-        score = BITS * F.logsigmoid(Z) + (1.0 - BITS) * F.logsigmoid(-Z)  # [B, C, K]
-        cls_idx = score.sum(dim=-1).argmax(dim=1)                          # [B]
+        class_scores = torch.matmul(z_adj, codes.t()) # [B, C]
+        
+        # ----- Old Code:  ------ 
+        # Broadcast to classes
+        # Z = z_adj.unsqueeze(1)          # [B, 1, K]
+        # BITS = codes.unsqueeze(0)       # [1, C, K]
+        # score_per_bit= BITS * F.logsigmoid(Z) + (1.0 - BITS) * F.logsigmoid(-Z)  # [B, C, K]
+        # class_scores = score_per_bit.sum(dim=-1) # [B, C]
+        
+        # WARNING: argmax and max(softmax) might lead to different idxs due to floating point errors.
+        if not full_return:    
+            cls_idx = class_scores.argmax(dim=1) # [B]
+        else:
+            probs = F.softmax(class_scores, dim=1) # [B, C]
+            
+            # Get Conf [B] and Indices [B]
+            conf, pred_idx = torch.max(probs, dim=1) 
+            
+            # Get Gap [B]
+            top2_vals, _ = torch.topk(probs, k=2, dim=1) # [B, 2]
+            gap = top2_vals[:, 0] - top2_vals[:, 1]
+            
+            pred_class_ids = keys[pred_idx]
+            
+            return pred_class_ids, conf, gap
 
     elif mode == "hard":
         # Hard bit decisions: (z > tau) <=> (sigmoid(z) > 1/(1+w))
@@ -661,7 +679,7 @@ def ecoc_decode(
         cls_idx = dists.argmin(dim=1)  # [B]
     
     # Map argmax indices back to class IDs
-    pred_class_ids = keys_tensor[cls_idx]  # [B]
+    pred_class_ids = keys[cls_idx]  # [B]
     return pred_class_ids
 
 

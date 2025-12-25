@@ -17,7 +17,8 @@ from .visualizer import plot_geopandas, _prep_dataframe
 from nirs.create_nirs import build_model
 from geodata.ecoc.ecoc import (
     load_ecoc_codes,
-    ecoc_decode
+    ecoc_decode,
+    _prepare_codebook_tensor
 )
 
 from nirs.engine import (
@@ -236,6 +237,8 @@ def _run_model_on_parquet(
     pred_dist = np.zeros(N, dtype=np.float32)
     pred_c1 = np.zeros(N, dtype=np.int64)
     pred_c2 = np.zeros(N, dtype=np.int64)
+    
+    class_ids, codes_mat = _prepare_codebook_tensor(codebook, device, pred_c1.dtype)  # codes: [C,K]
 
     for s_idx in range(0, N, batch_size):
         e_idx = min(N, s_idx + batch_size)
@@ -255,8 +258,8 @@ def _run_model_on_parquet(
 
         if label_mode == "ecoc":
             # Use shared ecoc_decode (soft mode) consistent with pos_weight
-            c1_idx_pred = ecoc_decode(logits_c1, codebook, pos_weight=pw_c1, mode="soft")
-            c2_idx_pred = ecoc_decode(logits_c2, codebook, pos_weight=pw_c2, mode="soft")
+            c1_idx_pred = ecoc_decode(logits_c1, codes_mat, class_ids, pos_weight=pw_c1, mode="soft")
+            c2_idx_pred = ecoc_decode(logits_c2, codes_mat, class_ids, pos_weight=pw_c2, mode="soft")
             pred_c1[s_idx:e_idx] = c1_idx_pred.long().cpu().numpy()
             pred_c2[s_idx:e_idx] = c2_idx_pred.long().cpu().numpy()
         else:

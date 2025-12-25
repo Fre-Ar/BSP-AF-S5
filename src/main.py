@@ -58,7 +58,8 @@ def train():
         s=S,
         
         regularize_hyperparams=REG_HYPER,
-        global_z=GLOBAL_Z)
+        global_z=GLOBAL_Z
+        )
     dt = time.perf_counter() - t0
     print(f"Total training time Elapsed: {dt:.3f}s")
 
@@ -113,8 +114,8 @@ def img():
     
     dt = time.perf_counter() - t0
     print(f"Total rasterization time Elapsed: {dt:.3f}s")
-    
+
 if __name__ == "__main__":
-    #train()
-    viz()
+    train()
+    #viz()
     #img()

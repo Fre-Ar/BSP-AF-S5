@@ -10,7 +10,7 @@ from PIL import Image
 import math
 
 
-from geodata.ecoc.ecoc import load_ecoc_codes, ecoc_decode, _ecoc_decode_soft_old, _codebook_to_bits_matrix_local
+from geodata.ecoc.ecoc import load_ecoc_codes, ecoc_decode, _ecoc_decode_soft_old, _codebook_to_bits_matrix_local, _prepare_codebook_tensor
 
 from nirs.world_bank_country_colors import colors_important
 from nirs.create_nirs import build_model
@@ -290,6 +290,8 @@ def rasterize_model_from_checkpoint(
         label_mode=label_mode,
         codes_path=codes_path,
         device=device)
+    
+    class_ids, codes_mat = _prepare_codebook_tensor(codebook, device, torch.float32)  # codes: [C,K]
     
     cfg = ckpt.get("config", {})
     pw_c1, pw_c2 = cfg.get("pos_weight_c1", None), cfg.get("pos_weight_c2", None)
