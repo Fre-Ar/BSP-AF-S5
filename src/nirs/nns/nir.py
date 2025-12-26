@@ -38,7 +38,7 @@ class NIRTrunk(nn.Module):
         super().__init__()
         
         depth = len(layer_counts)
-        assert depth >= 2
+        assert depth >= 2, "depth must be ≥ 2"
         if not params:
             params = ((),)*depth
         assert len(params) == depth

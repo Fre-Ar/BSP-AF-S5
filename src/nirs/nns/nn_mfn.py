@@ -6,62 +6,79 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .nir import ClassHeadConfig
+
 
 # -----------------------------
 # Filters (g(x; θ))
 # -----------------------------
 class FourierFilter(nn.Module):
     '''
-    g(x) = sin(Ω x + φ), with learnable Ω ∈ R[d, in_dim], φ ∈ R[d].
-    Paper Eq. (4).  Fathony et al., ICLR'21.
+    σ(x,θ_i) = sin(linear(x))
     '''
-    def __init__(self, in_dim: int, d: int, omega_init_std: float = 1.0, phi_init_std: float = 0.0):
+    def __init__(self,
+                 in_dim: int,
+                 out_dim: int,
+                 depth: int, 
+                 weight_scale: int = 1.0,
+                 init_regime:  Optional[function] = None,     
+        ):
         super().__init__()
-        self.in_dim, self.d = in_dim, d
-        self.Omega = nn.Parameter(torch.randn(d, in_dim) * omega_init_std)
-        self.phi   = nn.Parameter(torch.randn(d) * phi_init_std)
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.depth = depth # depth of the total network
+        self.linear = nn.Linear(in_dim, out_dim)
+        
+        init_regime(self.linear, -1, params=(weight_scale, depth, 1.0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, in_dim) -> (B, d)
-        return torch.sin(x @ self.Omega.t() + self.phi)
+        return torch.sin(self.linear(x))
 
 
 class GaborFilter(nn.Module):
     '''
-    g(x) = exp(-γ/2 * ||x - μ||^2) * sin(ω^T x + φ)
-    θ = {ω ∈ R[d,in_dim], φ ∈ R[d], μ ∈ R[d,in_dim], γ ∈ R[d] (γ>0 via softplus)}.
-    Paper Eq. (8).  Init per paper: μ ~ Uniform(input_range), γ ~ Gamma(α/k, β).
+    σ(x,θ_i) = exp(-γ_i/2 * ||x - µ_i||^2) * sin(linear(x))
+    
+    μ ~ Uniform(input_range)
+    
+    γ ~ Γ(concentration, rate), where:
+    concentration = α/depth
+    rate = β -> scale = 1/β
+    
+    (γ>0 via softplus)
     '''
     def __init__(self,
                  in_dim: int,
-                 d: int,
+                 out_dim: int,
+                 depth: int, 
+                 weight_scale: int = 1.0,
+                 gamma_alpha: float = 6.0,
+                 gamma_beta: float  = 1.0,
                  input_min: float = -1.0,
                  input_max: float =  1.0,
-                 gamma_alpha: float = 2.0,
-                 gamma_beta: float  = 1.0,
-                 depth_k: int = 4,  # used to scale alpha -> alpha/k
-                 omega_init_std: float = 1.0,
-                 phi_init_std: float = 0.0):
+                 init_regime:  Optional[function] = None,     
+        ):
         super().__init__()
-        self.in_dim, self.d = in_dim, d
-
-        # sin part
-        self.omega = nn.Parameter(torch.randn(d, in_dim) * omega_init_std)
-        self.phi   = nn.Parameter(torch.randn(d) * phi_init_std)
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.depth = max(depth, 1) # depth of the total network
+        self.linear = nn.Linear(in_dim, out_dim)
 
         # Gaussian window params
-        mu = (input_min - input_max) * torch.rand(d, in_dim) + input_max  # uniform in [min,max]
+        mu = (input_min - input_max) * torch.rand(out_dim, in_dim) + input_max  # uniform in [min,max]
         self.mu = nn.Parameter(mu)
 
         # gamma > 0 via softplus(raw_gamma)
         # sample from Gamma(alpha/k, beta) then invert softplus to seed raw_gamma
-        alpha = max(gamma_alpha / max(depth_k, 1), 1e-3)
+        alpha = max(gamma_alpha / depth, 1e-3)
         beta  = gamma_beta
         with torch.no_grad():
-            g0 = torch.distributions.Gamma(alpha, 1.0 / beta).sample((d,))  # rate=1/β ⇒ scale=β
+            g0 = torch.distributions.Gamma(alpha, beta).sample((out_dim,)) 
             # inverse softplus for stable init
             raw = g0 + torch.log(-torch.expm1(-g0))
         self.raw_gamma = nn.Parameter(raw)
+        
+        init_regime(self.linear, -1, params=(weight_scale, depth, torch.sqrt(self.gamma[:, None])))
 
     @property
     def gamma(self) -> torch.Tensor:
@@ -69,10 +86,18 @@ class GaborFilter(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, in_dim)
-        sin_part = torch.sin(x @ self.omega.t() + self.phi)          # (B, d)
-        # ||x - μ||^2 for every unit j: expand x -> (B,1,D), μ -> (1,d,D)
-        diff2 = (x.unsqueeze(1) - self.mu.unsqueeze(0)).pow(2).sum(-1)  # (B, d)
-        window = torch.exp(-0.5 * diff2 * self.gamma.unsqueeze(0))       # (B, d)
+        sin_part = torch.sin(self.linear(x))          # (B, d)
+        
+        # computing the difference squared D 
+        # with the expanded formula to avoid memory spikes
+        D = (
+            (x * x).sum(-1)[..., None]
+            + (self.mu * self.mu).sum(-1)[None, :]
+            - 2 * x @ self.mu.T
+        )
+        D = D.clamp_min_(0)
+        
+        window = torch.exp(-0.5 * D * self.gamma.unsqueeze(0))       # (B, d)
         return window * sin_part
 
 
@@ -98,22 +123,21 @@ class MFNTrunk(nn.Module):
                  width: int,
                  depth: int,
                  filter_type: Literal['fourier', 'gabor'] = 'fourier',
-                 **filter_kwargs):
+                 weight_scale: float = 1.0,
+                 linear_init_regime:  Optional[function] = None,
+                 filter_init_regime:  Optional[function] = None,
+                 ):
         super().__init__()
         assert depth >= 1, "depth must be ≥ 1"
         self.in_dim, self.width, self.depth = in_dim, width, depth
 
         # filters g_i
         filters = []
-        for i in range(depth):
+        for _ in range(depth):
             if filter_type == 'fourier':
-                filters.append(FourierFilter(in_dim, width, **{k:v for k,v in filter_kwargs.items()
-                                                               if k in ('omega_init_std','phi_init_std')}))
+                filters.append(FourierFilter(in_dim, width, depth, weight_scale, init_regime=filter_init_regime))
             elif filter_type == 'gabor':
-                # pass depth to scale gamma alpha by 1/k as per paper
-                fk = dict(filter_kwargs)
-                fk.setdefault('depth_k', depth)
-                filters.append(GaborFilter(in_dim, width, **fk))
+                filters.append(GaborFilter(in_dim, width, depth, weight_scale, init_regime=filter_init_regime))
             else:
                 raise ValueError("filter_type must be 'fourier' or 'gabor'")
         self.filters = nn.ModuleList(filters)
@@ -121,18 +145,10 @@ class MFNTrunk(nn.Module):
         # linear layers W_i for i=1..k-1 mapping width->width
         self.linears = nn.ModuleList([nn.Linear(width, width) for _ in range(depth - 1)])
 
-        self._init_weights_divide_by_sqrtk()
-
-    def _init_weights_divide_by_sqrtk(self):
-        # Per paper: regardless of base init, divide W by sqrt(k) to keep final freq variance depth-invariant.
-        # Biases -> 0.
-        with torch.no_grad():
-            scale = 1.0 / math.sqrt(max(self.depth, 1))
-            for lin in self.linears:
-                nn.init.kaiming_uniform_(lin.weight, a=math.sqrt(5))
-                lin.weight.mul_(scale)
-                nn.init.zeros_(lin.bias)
-
+        if linear_init_regime is not None:
+            for i in range(depth-1):
+                linear_init_regime(self.linears[i], i, params=(weight_scale, depth, 1.0))
+                
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, in_dim)
         z = self.filters[0](x)                         # (B, width)
@@ -202,15 +218,36 @@ class MFN_NIR(nn.Module):
                  width: int,
                  depth: int,
                  filter_type: Literal['fourier', 'gabor'] = 'fourier',
-                 c_bits: int = 32,
-                 dist_hidden: Optional[int] = 128,
-                 cls_hidden: Optional[int] = 128,
-                 **filter_kwargs):
+                 weight_scale: float = 1.0,
+                 linear_init_regime:  Optional[function] = None,
+                 filter_init_regime:  Optional[function] = None,
+                 class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32)
+                 ):
         super().__init__()
-        self.trunk = MFNTrunk(in_dim, width, depth, filter_type, **filter_kwargs)
-        self.head_dist = DistanceHead(width, hidden=dist_hidden)
-        self.head_c1   = ClassHead(width, out_dim=c_bits, hidden=cls_hidden)
-        self.head_c2   = ClassHead(width, out_dim=c_bits, hidden=cls_hidden)
+        self.trunk = MFNTrunk(in_dim, width, depth, filter_type)
+        
+        def make_head(out_dim: int):
+            layer = nn.Linear(width, out_dim)
+            if linear_init_regime is not None:
+                linear_init_regime(layer, -1, params=(weight_scale, depth, 1.0))
+            return layer
+
+        if class_cfg.class_mode == "ecoc":
+            out_c1 = out_c2 = class_cfg.n_bits
+        elif class_cfg.class_mode == "softmax":
+            out_c1 = class_cfg.n_classes_c1
+            out_c2 = class_cfg.n_classes_c2
+        else:
+            raise ValueError(f"Unknown class_mode={class_cfg.class_mode}")
+
+        self.dist_head = make_head(1)
+        self.c1_head   = make_head(out_c1)
+        self.c2_head   = make_head(out_c2)
+        self.softplus  = nn.Softplus()
+        
+        #self.head_dist = DistanceHead(width, hidden=dist_hidden)
+        #self.head_c1   = ClassHead(width, out_dim=c_bits, hidden=cls_hidden)
+        #self.head_c2   = ClassHead(width, out_dim=c_bits, hidden=cls_hidden)
 
     def forward(self, x: torch.Tensor):
         '''
@@ -219,7 +256,7 @@ class MFN_NIR(nn.Module):
           dist: (B,1), c1_logits: (B,c_bits), c2_logits: (B,c_bits)
         '''
         z = self.trunk(x)
-        dist = self.head_dist(z)
-        c1   = self.head_c1(z)
-        c2   = self.head_c2(z)
+        dist = self.softplus(self.dist_head(z))
+        c1   = self.c1_head(z)
+        c2   = self.c2_head(z)
         return dist, c1, c2

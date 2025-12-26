@@ -8,11 +8,18 @@ from .nns.nn_incode import INCODE_NIR
 from .nns.nn_gauss import GAUSSLayer
 from .nns.nn_hosc import HOSCLayer
 from .nns.nn_sinc import SINCLayer
+from .nns.nn_mfn import MFN_NIR
 from .nns.fourier_features import BasicEncoding, PositionalEncoding, RandomGaussianEncoding
 from .nns.nir import MultiHeadNIR, ClassHeadConfig
 from .nns.nn_split import SplitNIR
 from .inference import InferenceConfig
-from .nns.init_regimes import init_siren_linear, init_linear
+from .nns.init_regimes import (
+    init_siren_linear,
+    init_linear,
+    init_reset,
+    init_finer_linear,
+    init_mfn_linear,
+    init_mfn_filter)
  
 from utils.utils_geo import ECOC_BITS, NUM_COUNTRIES
 from utils.utils import human_int, pretty_tuple, trimf
@@ -41,6 +48,9 @@ ENCODER_REGISTRY: Dict[str, Type] = {
 INIT_REGISTRY: Dict[str, function] = {
     "siren": init_siren_linear,
     "default": init_linear,
+    "reset": init_reset,
+    "finer": init_finer_linear,
+    "mfn": init_mfn_linear,
 }
 
 # -----------------------------------------------------------------------------
@@ -107,7 +117,10 @@ def _build_standard_nir(cfg: InferenceConfig, class_head_cfg: ClassHeadConfig):
 
 def _build_incode(cfg: InferenceConfig, class_head_cfg: ClassHeadConfig):
     """Builds the INCODE architecture."""
+    init_regime = INIT_REGISTRY.get(cfg.init_regime.lower()) if cfg.init_regime else None
+    
     return INCODE_NIR(
+        init_regime=init_regime,
         in_dim=3,
         w0_first=cfg.w0,
         w0_hidden=cfg.w_hidden,
@@ -123,6 +136,22 @@ def _build_split_nir(cfg: InferenceConfig, class_head_cfg: ClassHeadConfig):
         in_dim=3,
         layer_counts=cfg.layer_counts,
         params=_get_layer_params(cfg, "split_siren"),
+        class_cfg=class_head_cfg
+    )
+    
+def _build_mfn(cfg: InferenceConfig, class_head_cfg: ClassHeadConfig):
+    """Builds the MFN architecture."""
+    filter_name = cfg.model_name.split('_')[1]
+    init_regime = INIT_REGISTRY.get(cfg.init_regime.lower()) if cfg.init_regime else None
+
+    return MFN_NIR(
+        in_dim=3,
+        width=cfg.layer_counts[0],
+        depth=len(cfg.layer_counts),
+        filter_type=filter_name,
+        weight_scale=1.0,
+        linear_init_regime=init_regime,
+        filter_init_regime=init_mfn_filter,
         class_cfg=class_head_cfg
     )
 
@@ -211,6 +240,8 @@ def build_model(
         model = _build_split_nir(model_cfg, class_cfg)
     elif name in LAYER_REGISTRY:
         model = _build_standard_nir(model_cfg, class_cfg)
+    elif name.startswith('mfn'): # mfn_fourier or mfn_gabor
+        model = _build_mfn(model_cfg, class_cfg)
     else:
         raise ValueError(f"Unknown model name: {model_cfg.model_name}")
     
