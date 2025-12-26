@@ -653,7 +653,6 @@ def ecoc_decode(
         # score_per_bit= BITS * F.logsigmoid(Z) + (1.0 - BITS) * F.logsigmoid(-Z)  # [B, C, K]
         # class_scores = score_per_bit.sum(dim=-1) # [B, C]
         
-        # WARNING: argmax and max(softmax) might lead to different idxs due to floating point errors.
         if not full_return:    
             cls_idx = class_scores.argmax(dim=1) # [B]
         else:

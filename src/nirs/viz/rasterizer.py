@@ -9,9 +9,6 @@ import torch.nn.functional as F
 from PIL import Image
 import math
 
-
-from geodata.ecoc.ecoc import ecoc_decode, _ecoc_decode_soft_old, _codebook_to_bits_matrix_local, _prepare_codebook_tensor
-
 from nirs.world_bank_country_colors import colors_important
 from nirs.viz.visualizer import _hash_colors  
 from nirs.engine import Predictor

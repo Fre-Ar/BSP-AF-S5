@@ -3,6 +3,7 @@
 # --- I/O ---
 import os
 import tempfile
+from pathlib import Path
 from contextlib import contextmanager
 
 # --- Math ---
@@ -15,12 +16,12 @@ from typing import Optional
 
 # --- Our modules ---
 from .visualizer import plot_geopandas
-from geodata.ecoc.ecoc import (
-    ecoc_decode,
-    _prepare_codebook_tensor
-)
 from nirs.engine import Predictor
 from nirs.inference import InferenceConfig
+from nirs.metrics import compute_classification_metrics, compute_distance_metrics
+from nirs.training import aggregate_params
+from utils.utils_geo import METRICS_CSV
+
 
 # -------------------------------------------------------------------
 # Small plotting helper (green/red correctness scatter)
@@ -125,7 +126,7 @@ def _plot_derived_field(
 # Public: comparison / visualization entry points
 # -------------------------------------------------------------------
 
-def compare_parquet_and_model_ecoc(
+def visualize_model(
     parquet_path: str,
     checkpoint_path: str,
     
@@ -138,7 +139,10 @@ def compare_parquet_and_model_ecoc(
     device: str | None = None,
     
     predictions_only: bool = False,
-    overrides=None
+    show_plots: bool = True,
+    overrides=None,
+    
+    metrics_csv: str = METRICS_CSV
 ):
     """
     Compares a trained model against a sampled subset of the training parquet.
@@ -162,23 +166,32 @@ def compare_parquet_and_model_ecoc(
     xyz = (xyz / np.clip(nrm, 1e-9, None)).astype(np.float32)
 
     
-    # Run inference and get predictions
+    # 2. Run inference and get predictions
     predictor = Predictor(model_cfg, checkpoint_path, device)
     
     N = len(df)
     pred_dist = np.zeros(N, dtype=np.float32)
     pred_c1 = np.zeros(N, dtype=np.int64)
     pred_c2 = np.zeros(N, dtype=np.int64)
+    
+    # We collect logits in lists
+    all_logits_c1 = []
+    all_logits_c2 = []
 
     print(f"[Compare] Running inference on {N} points...")
     for s_idx in range(0, N, batch_size):
         e_idx = min(N, s_idx + batch_size)
         batch_xyz = xyz[s_idx:e_idx]
         
-        p = predictor.predict(batch_xyz)
+        # We need logits for metrics
+        p = predictor.predict(batch_xyz, return_logits=True)
         pred_dist[s_idx:e_idx] = p.dist_km
         pred_c1[s_idx:e_idx] = p.c1_ids
         pred_c2[s_idx:e_idx] = p.c2_ids
+        
+        if not predictions_only:
+            all_logits_c1.append(p.logits_c1)
+            all_logits_c2.append(p.logits_c2)
     
     # 3. Visualizations
     if predictions_only:
@@ -189,20 +202,108 @@ def compare_parquet_and_model_ecoc(
             _plot_derived_field(df,arr,name,color_mode="hashed",markersize=3,overrides=overrides)
         return {"pred_dist": pred_dist, "pred_c1": pred_c1, "pred_c2": pred_c2}
 
-    # Comparison Mode
+    # 4. Metrics & Comparison
+    print("[Compare] Computing metrics...")
+    
+    # Prepare Ground Truth
     y_dist_km = df["dist_km"].to_numpy(dtype=np.float32)
     y_c1 = df["c1_id"].to_numpy(dtype=np.int64)
     y_c2 = df["c2_id"].to_numpy(dtype=np.int64)
 
+    # Basic Visuals
     err_km = np.abs(pred_dist - y_dist_km)
     c1_ok = (pred_c1 == y_c1)
     c2_ok = (pred_c2 == y_c2)
 
-    
-    _plot_derived_field(df, err_km, "err_km", color_mode="continuous", log_scale=True, overrides=overrides)
-    _plot_green_red(df["lon"].values, df["lat"].values, c1_ok, "c1 Correctness")
-    _plot_green_red(df["lon"].values, df["lat"].values, c2_ok, "c2 Correctness")
+    if show_plots:
+        _plot_derived_field(df, err_km, "err_km", color_mode="continuous", log_scale=True, overrides=overrides)
+        _plot_green_red(df["lon"].values, df["lat"].values, c1_ok, "c1 Correctness")
+        _plot_green_red(df["lon"].values, df["lat"].values, c2_ok, "c2 Correctness")
 
+    # Full Metrics Calculation
+    stats = {}
+    
+    # Convert collected numpy arrays back to Torch CPU tensors
+    t_pred_dist = torch.from_numpy(pred_dist)
+    t_y_dist = torch.from_numpy(y_dist_km)
+    
+    t_logits_c1 = torch.from_numpy(np.concatenate(all_logits_c1, axis=0))
+    t_y_c1_id = torch.from_numpy(y_c1)
+    
+    t_logits_c2 = torch.from_numpy(np.concatenate(all_logits_c2, axis=0))
+    t_y_c2_id = torch.from_numpy(y_c2)
+    # A. Distance Metrics
+    d_metrics = compute_distance_metrics(t_pred_dist, t_y_dist)
+    stats.update(d_metrics)
+    
+    # B. Classification Metrics
+    # We need to reconstruct the bits tensor if ECOC
+    if model_cfg.label_mode == "ecoc":
+        if predictor.codebook is None:
+            raise ValueError("label_mode='ecoc' requires a codebook.")
+        c1_bits = np.stack([predictor.codebook[int(cid)] for cid in y_c1], axis=0).astype(np.float32)
+        c2_bits = np.stack([predictor.codebook[int(cid)] for cid in y_c1], axis=0).astype(np.float32)
+        c1_bits = torch.from_numpy(c1_bits)
+        c2_bits = torch.from_numpy(c2_bits)
+    else:
+        c1_bits = None
+        c2_bits = None
+    
+    cpu_codes = predictor.codes_mat.cpu() if predictor.codes_mat is not None else None
+    cpu_ids = predictor.class_ids.cpu() if predictor.class_ids is not None else None
+    cpu_pw1 = predictor.pw_c1.cpu() if predictor.pw_c1 is not None else None
+    cpu_pw2 = predictor.pw_c2.cpu() if predictor.pw_c2 is not None else None
+    
+    c1_metrics = compute_classification_metrics(
+        logits=t_logits_c1,
+        targets=t_y_c1_id,
+        target_dist_km=t_y_dist,
+        label_mode=model_cfg.label_mode,
+        codes_mat=cpu_codes,
+        class_ids=cpu_ids,
+        pos_weight=cpu_pw1,
+        bits=c1_bits
+    )
+    for k, v in c1_metrics.items(): stats[f"c1_{k}"] = v
+    
+    # Compute C2
+    c2_metrics = compute_classification_metrics(
+        logits=t_logits_c2,
+        targets=t_y_c2_id,
+        target_dist_km=t_y_dist,
+        label_mode=model_cfg.label_mode,
+        codes_mat=cpu_codes,
+        class_ids=cpu_ids,
+        pos_weight=cpu_pw2,
+        bits=c2_bits
+    )
+    for k, v in c2_metrics.items(): stats[f"c2_{k}"] = v
+    
+    num_params = sum(p.numel() for p in predictor.model.parameters())
+    ckpt_cfg = predictor.ckpt.get("config", {})
+    epochs_trained = ckpt_cfg = predictor.ckpt.get("epoch", 0)
+    
+    global_meta = aggregate_params(
+        model_cfg, 
+        num_params, 
+        lr=ckpt_cfg['lr'], 
+        weight_decay=ckpt_cfg['wd'], 
+        train_set=ckpt_cfg['train_set'], 
+        eval_set=parquet_path,
+        epochs_trained=epochs_trained)
+    
+    row = [{
+        '': global_meta
+    }]
+    csv_path = Path(metrics_csv)
+    
+    df = pd.DataFrame([row])
+    df.to_csv(
+        csv_path,
+        mode="a",                     # append
+        header=not csv_path.exists(), # write header only once
+        index=False
+    )
     print(
         f"[distance]  MAE={err_km.mean():.3f} km | "
         f"median={np.median(err_km):.3f} km | "

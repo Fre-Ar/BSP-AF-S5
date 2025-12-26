@@ -37,8 +37,8 @@ class BordersParquet(Dataset):
             "dist":       FloatTensor (1,),        # km
             "log1p_dist": FloatTensor (1,),
             "r_band":     IntTensor (1,),
-            "c1_idx":     LongTensor (),           # raw class id
-            "c2_idx":     LongTensor (),
+            "c1_id":      LongTensor (),           # raw class id
+            "c2_id":      LongTensor (),
             "c1_bits":    FloatTensor (n_bits,),
             "c2_bits":    FloatTensor (n_bits,),
           }
@@ -157,8 +157,8 @@ class BordersParquet(Dataset):
             "dist":      self.dist[i],       # (1,)
             "log1p_dist":self.log1p_dist[i],       # (1,)
             "r_band":    self.r_band[i],
-            "c1_idx":    self.c1_id[i],
-            "c2_idx":    self.c2_id[i],
+            "c1_id":     self.c1_id[i],
+            "c2_id":     self.c2_id[i],
         }
         if self.label_mode == "ecoc":
             item["c1_bits"] = self.c1_bits[i]  # (n_bits,)
@@ -194,8 +194,8 @@ class FastTensorDataLoader:
                 "dist": self.ds.dist[idx],
                 "log1p_dist": self.ds.log1p_dist[idx],
                 "r_band": self.ds.r_band[idx],
-                "c1_idx": self.ds.c1_id[idx],
-                "c2_idx": self.ds.c2_id[idx],
+                "c1_id": self.ds.c1_id[idx],
+                "c2_id": self.ds.c2_id[idx],
             }
             
             if self.ds.label_mode == "ecoc":

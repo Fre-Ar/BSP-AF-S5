@@ -48,5 +48,7 @@ class Prediction:
     dist_km: np.ndarray      # Distance in km
     c1_ids: np.ndarray       # Class ID 1
     c2_ids: np.ndarray       # Class ID 2
+    logits_c1: Optional[np.ndarray] = None 
+    logits_c2: Optional[np.ndarray] = None
 
 

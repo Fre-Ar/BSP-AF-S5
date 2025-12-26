@@ -3,7 +3,7 @@ import os
 import time
 import math
 
-from nirs.viz.compare_data_viz import compare_parquet_and_model_ecoc
+from nirs.viz.compare_data_viz import visualize_model
 from nirs.viz.rasterizer import raster
 from nirs.training import train_and_eval
 from nirs.create_nirs import get_model_path
@@ -79,7 +79,7 @@ def train():
     print(f"Total training time Elapsed: {dt:.3f}s")
 
 def viz(pred: bool = False):  
-    compare_parquet_and_model_ecoc(
+    visualize_model(
         parquet_path=os.path.join(TRAINING_DATA_PATH, "log_dataset_1M.parquet"),
         #parquet_path=os.path.join(TRAINING_DATA_PATH, "eval_uniform_1M.parquet"),
         #parquet_path=os.path.join(TRAINING_DATA_PATH, "eval_border_1M.parquet"),
@@ -89,7 +89,7 @@ def viz(pred: bool = False):
         
         sample=1_000_000,
         predictions_only=pred,
-        
+        show_plots=False,
         overrides={180: "#000000"} #australia becomes black
         )
 
@@ -106,6 +106,6 @@ def img():
     print(f"Total rasterization time Elapsed: {dt:.3f}s")
 
 if __name__ == "__main__":
-    train()
-    #viz(True)
+    #train()
+    viz()
     #img()

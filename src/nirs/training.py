@@ -136,8 +136,8 @@ class Trainer:
             loss_c1 = self.bce_c1(c1_logits, batch["c1_bits"].to(self.device))
             loss_c2 = self.bce_c2(c2_logits, batch["c2_bits"].to(self.device))
         else:
-            loss_c1 = self.ce_loss(c1_logits, batch["c1_idx"].to(self.device))
-            loss_c2 = self.ce_loss(c2_logits, batch["c2_idx"].to(self.device))
+            loss_c1 = self.ce_loss(c1_logits, batch["c1_id"].to(self.device))
+            loss_c2 = self.ce_loss(c2_logits, batch["c2_id"].to(self.device))
             
         return loss_dist, loss_c1, loss_c2
     
@@ -239,11 +239,11 @@ class Trainer:
             
             # Classification
             all_c1_logits.append(c1_logits.cpu())
-            if "c1_idx" in batch: all_c1_gt.append(batch["c1_idx"].cpu())
+            if "c1_id" in batch: all_c1_gt.append(batch["c1_id"].cpu())
             if "c1_bits" in batch: all_c1_bits.append(batch["c1_bits"].cpu())
             
             all_c2_logits.append(c2_logits.cpu())
-            if "c2_idx" in batch: all_c2_gt.append(batch["c2_idx"].cpu())
+            if "c2_id" in batch: all_c2_gt.append(batch["c2_id"].cpu())
             if "c2_bits" in batch: all_c2_bits.append(batch["c2_bits"].cpu())
             
         
@@ -300,25 +300,15 @@ class Trainer:
         
         return stats
     
-def setup_logging(
-    out_dir: str | os.PathLike,
-    log_dir: str | os.PathLike,
-    model_path: str,
-    parquet_path: str,
-    num_params: int,
-    
+def aggregate_params(
     model_cfg: InferenceConfig,
+    num_params: int,
     lr: float,
-    weight_decay: float
+    weight_decay: float,
+    train_set: str,
+    eval_set: str | None = None,
+    epochs_trained: int = -1
 ):
-    out_path = pathlib.Path(out_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
-    save_path = out_path / model_path
-    
-    log_path = pathlib.Path(log_dir)
-    log_path.mkdir(parents=True, exist_ok=True)
-    csv_path = log_path / (save_path.stem + ".csv")
-    
     hyper_params = [
         f"ω0={trimf(model_cfg.w0)}",
         f"ωh={trimf(model_cfg.w_hidden)}",
@@ -339,7 +329,6 @@ def setup_logging(
     hyper_params = ';'.join(hyper_params)
     enc_params = ';'.join(enc_params)
 
-
     # Static Global Params
     global_meta = {
         "model": model_cfg.model_name,
@@ -353,8 +342,45 @@ def setup_logging(
         "size": f"{trimf(num_params*4e-6)}MB",
         "hyper_params": hyper_params,
         "encoder_params": enc_params,
-        "train_set": pathlib.Path(parquet_path).name.replace('.parquet', ''),
+        "train_set": pathlib.Path(train_set).name.replace('.parquet', '')
     }
+    if eval_set:
+        global_meta = {
+            **global_meta,
+            "epochs_trained": epochs_trained,
+            "eval_set": pathlib.Path(eval_set).name.replace('.parquet', '')
+        }
+        
+    return global_meta
+    
+    
+def setup_logging(
+    out_dir: str | os.PathLike,
+    log_dir: str | os.PathLike,
+    model_path: str,
+    parquet_path: str,
+    num_params: int,
+    
+    model_cfg: InferenceConfig,
+    lr: float,
+    weight_decay: float,
+    eval_set: str | None = None,
+):
+    out_path = pathlib.Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    save_path = out_path / model_path
+    
+    log_path = pathlib.Path(log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
+    csv_path = log_path / (save_path.stem + ".csv")
+    
+    global_meta = aggregate_params(
+        model_cfg, 
+        num_params, 
+        lr, 
+        weight_decay, 
+        parquet_path, 
+        eval_set)
     
     return global_meta, save_path, csv_path
 

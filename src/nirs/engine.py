@@ -137,13 +137,14 @@ class Predictor:
         return self.model(x)
 
     @torch.no_grad()
-    def predict(self, xyz: Union[np.ndarray, torch.Tensor], tau: float = 1.0) -> Prediction:
+    def predict(self, xyz: Union[np.ndarray, torch.Tensor], tau: float = 1.0, return_logits: bool = False) -> Prediction:
         """
         Runs inference on a batch of points.
         
         Args:
             xyz: (N, 3) array or tensor of unit vectors.
             tau: Temperature for ECOC decoding (default 1.0).
+            return_logits: If True, includes raw logits in the output.
             
         Returns:
             Prediction object with cpu numpy arrays.
@@ -180,5 +181,7 @@ class Predictor:
         return Prediction(
             dist_km=dist_km.cpu().numpy(),
             c1_ids=c1_ids.long().cpu().numpy(),
-            c2_ids=c2_ids.long().cpu().numpy()
+            c2_ids=c2_ids.long().cpu().numpy(),
+            logits_c1=c1_logits.cpu().numpy() if return_logits else None,
+            logits_c2=c2_logits.cpu().numpy() if return_logits else None
         )

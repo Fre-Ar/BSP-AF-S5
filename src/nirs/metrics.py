@@ -13,12 +13,32 @@ def compute_distance_metrics(
     bands: list[tuple[float, float]] = [(0, 25), (25, 150), (150, float('inf'))]
 ) -> Dict[str, float]:
     """
-    Computes distance metrics (RMSE, MedAE, etc.) globally and per-band.
-    Inputs should be flat 1D tensors in km.
+    Computes regression metrics for distance estimation, calculated both globally 
+    and within specific spatial bands.
+
+    Metrics calculated:
+    - **RMSE**: Root Mean Square Error.
+    - **MAE**: Mean Absolute Error.
+    - **ME**: Mean Error (Bias).
+    - **VE**: Variance of Error.
+    - **MedAE**: Median Absolute Error (Robust to outliers).
+    - **P95AE**: 95th Percentile Absolute Error (Worst-case performance).
+
+    Parameters
+    ----------
+    pred_km : torch.Tensor
+        1D Tensor of predicted distances in kilometers.
+    target_km : torch.Tensor
+        1D Tensor of ground truth distances in kilometers.
+    bands : list[tuple[float, float]]
+        List of (min, max) distance intervals. Metrics are computed separately 
+        for points falling into each band (e.g., "b0-25_RMSE").
+
+    Returns
+    -------
+    metrics : Dict[str, float]
+        Dictionary mapping metric names (e.g., "glob_RMSE", "b0-25_MAE") to values.
     """
-    # Ensure inputs are on CPU/numpy for quantiles/pandas ops if needed, 
-    # but torch is faster for basic stats.
-    # We'll stay in Torch for speed, move to float for result.
     
     diff = pred_km - target_km
     abs_diff = diff.abs()
@@ -68,7 +88,44 @@ def compute_classification_metrics(
     bands: list[tuple[float, float]] = [(0, 25), (25, 150), (150, float('inf'))]
 ) -> Dict[str, float]:
     """
-    Computes classification metrics globally and per-band: Top1, BalAcc, ECE, T2Gap, Conf.
+    Computes classification performance metrics (Accuracy, Calibration, Confidence) 
+    globally and per distance band. Supports both ECOC and Softmax modes.
+
+    Metrics calculated:
+    - **DecAcc**: Decoding Accuracy (Top-1).
+    - **BalAcc**: Balanced Accuracy (Mean Recall per class).
+    - **ECE**: Expected Calibration Error.
+    - **T2Gap**: Gap between Top-1 and Top-2 probabilities (Confidence margin).
+    - **Conf**: Top-1 Confidence.
+    - **BitAcc**: (ECOC only) Mean accuracy of individual code bits.
+
+    Parameters
+    ----------
+    logits : torch.Tensor
+        Model output. Shape [N, K] where K is num_classes (softmax) or n_bits (ECOC).
+    targets : torch.Tensor
+        Ground truth labels, aka Country IDs.
+        Shape [N].
+    target_dist_km : torch.Tensor
+        Ground truth distance, used to filter samples into spatial bands. Shape [N].
+    label_mode : str
+        "ecoc" or "softmax". Determines decoding strategy.
+    codes_mat : torch.Tensor
+        ECOC codebook matrix [C, K]. Required if label_mode="ecoc".
+    class_ids : torch.Tensor
+        Mapping from codebook index to raw Country ID [C]. Required for ECOC decoding.
+    pos_weight : torch.Tensor or None
+        Positive weights for BCE loss, used to calculate decision thresholds in ECOC.
+    bits : torch.Tensor or None
+        Ground truth bit vectors corresponding to `targets`. Shape [N, n_bits].
+        Required if label_mode="ecoc" to compute BitAcc.
+    bands : list[tuple[float, float]]
+        Distance intervals for stratified evaluation.
+
+    Returns
+    -------
+    metrics : Dict[str, float]
+        Dictionary mapping metric names (e.g., "glob_DecAcc", "b0-25_ECE") to values.
     """
     metrics = {}
     device = logits.device
@@ -91,7 +148,7 @@ def compute_classification_metrics(
         
         # 2. Decode to get Class Predictions and Raw Stats
         # All tensors of shape [B]
-        idx_pred, confs, gaps = ecoc_decode(
+        id_pred, confs, gaps = ecoc_decode(
             logits, codes_mat, class_ids, pos_weight, mode='soft', full_return=True)
         num_classes = codes_mat.shape[0]
         
@@ -109,8 +166,9 @@ def compute_classification_metrics(
         confs = top2_vals[:, 0]       # Top-1 probability
         gaps  = top2_vals[:, 0] - top2_vals[:, 1] # Margin
 
-        idx_pred = top2_idx[:, 0]
-    
+        # TODO: This idx might not be the indices
+        id_pred = top2_idx[:, 0]
+        
     # Helper for Aggregation
     def _calc_subset(mask, prefix):
         if not mask.any(): return
@@ -125,7 +183,7 @@ def compute_classification_metrics(
         # Compute Expensive stats (DecAcc, ECE, BalAcc)
         # Note: We pass the filtered tensors
         subset_stats = _compute_vectorized_stats(
-            preds=idx_pred[mask], 
+            preds=id_pred[mask], 
             targets=targets[mask], 
             confs=confs[mask], 
             num_classes=num_classes,
@@ -159,8 +217,26 @@ def _compute_vectorized_stats(
     n_bins: int = 10
 ) -> Dict[str, float]:
     """
-    Helper: Computes ECE, DecAcc, and BalAcc using vectorized GPU operations.
-    Shared by both ECOC and Softmax modes.
+    Helper function to compute expensive aggregate statistics (ECE, BalAcc) 
+    using vectorized scatter operations on GPU.
+
+    Parameters
+    ----------
+    preds : torch.Tensor
+        Predicted class ids [N].
+    targets : torch.Tensor
+        Ground truth class ids [N].
+    confs : torch.Tensor
+        Confidence (probability) of the predicted class [N].
+    num_classes : int
+        Total number of classes (for confusion matrix/BalAcc).
+    n_bins : int
+        Number of bins for Expected Calibration Error (ECE) calculation.
+
+    Returns
+    -------
+    stats : Dict[str, float]
+        Dictionary containing "DecAcc", "ECE", and "BalAcc".
     """
     stats = {}
     device = preds.device
@@ -199,7 +275,6 @@ def _compute_vectorized_stats(
     class_correct = torch.zeros(num_classes, device=device)
     class_total   = torch.zeros(num_classes, device=device)
     
-    # targets must be 0..C-1
     class_total.scatter_add_(0, targets, torch.ones_like(targets, dtype=torch.float))
     class_correct.scatter_add_(0, targets, correct)
     
