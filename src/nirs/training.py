@@ -329,9 +329,9 @@ def aggregate_params(
     ]
     
     enc_params = [
-        f"m={trimf(model_cfg.encoder_params[0])}",
-        f"σ={trimf(model_cfg.encoder_params[1])}",
-        f"α={trimf(model_cfg.encoder_params[2])}",
+        f"m={trimf(model_cfg.encod_m)}",
+        f"σ={trimf(model_cfg.encod_sigma)}",
+        f"α={trimf(model_cfg.encod_alpha)}",
     ]
     hyper_params = ';'.join(hyper_params)
     enc_params = ';'.join(enc_params)
@@ -420,7 +420,7 @@ def train_and_eval(
 
     t0 = time.perf_counter()
     # 1. Build Model
-    model, model_path = build_model(model_cfg, n_training=traning_size)
+    model, model_path = build_model(model_cfg, n_training=traning_size, max_epochs=epochs)
     model = model.to(device)
 
     # 2. Uncertainty Weighting

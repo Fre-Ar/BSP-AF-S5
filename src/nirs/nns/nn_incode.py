@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 from typing import Optional, Tuple
 
-from .nn_siren import init_siren_linear
 from .nir import ClassHeadConfig
 from .fourier_features import RandomGaussianEncoding as RFF
 
@@ -44,10 +43,6 @@ class Harmonizer(nn.Module):
                 if isinstance(m, nn.Linear):
                     m.weight.normal_(0.0, 1e-3)
                     m.bias.fill_(0.31)      # hidden bias mild positive
-            # last linear → neutral outputs
-            # TODO: check if including old code is worse/better than keeping it out
-            #last = [m for m in self.net.modules() if isinstance(m, nn.Linear)][-1]
-            #last.bias.zero_()              # => log a=0, log b=0, c=0, d=0
 
     def forward(self, z: torch.Tensor):
         raw = self.net(z)                                       # (B, out_dim)
@@ -71,25 +66,26 @@ class INCODETrunk(nn.Module):
     If scalars a,b,c,d are (B,1), they broadcast; if per-layer, pass (B, L, 1).
     '''
     def __init__(self,
+                 init_regime:  Optional[function] = None,
                  in_dim: int = 3,
                  layer_counts: Tuple[int,...] = (256,)*5,
                  w0_first: float = 30.0,
                  w0_hidden: float = 1.0,
                  bias: bool = True):
         super().__init__()
+        
         depth = len(layer_counts)
         layers = [nn.Linear(in_dim, layer_counts[0], bias=bias)]
+        
         for i in range(1, depth-1):
             layers.append(nn.Linear(layer_counts[i-1], layer_counts[i], bias=bias))
         self.net = nn.ModuleList(layers)
-        self.w0s = [w0_first] + [w0_hidden] * (depth - 1)
+        
 
         # SIREN init per layer
+        self.w0s = [w0_first] + [w0_hidden] * (depth - 1)
         for i, lin in enumerate(self.net):
-            # For layer 0, input is in_dim (3). For others, it's the width of the prev layer.
-            actual_in_dim = in_dim if i == 0 else layer_counts[i-1]
-            
-            init_siren_linear(lin, actual_in_dim, i, w=self.w0s[i])
+            init_regime(lin, i, params=(self.w0s[i]))
 
     def forward(self, x: torch.Tensor, a, b, c, d) -> torch.Tensor:
         if x.dim() == 1:
@@ -117,19 +113,20 @@ class INCODETrunk(nn.Module):
         return h  # (B, hidden_dim)
 
 # ---------------------------
-# Full NIR (continuous z(x) via RFF or Global Z)
+# Full NIR 
 # ---------------------------
 class INCODE_NIR(nn.Module):
     '''
-    INCODE variant without codebooks/tiling:
+    INCODE variant:
       - If learn_global_z=False: x -> RFF features -> Harmonizer -> (a,b,c,d)
       - If learn_global_z=True:  Global Latent z -> Harmonizer -> (a,b,c,d)
         - x → RFF features φ(x)
-        - harmonizer(φ(x)) → (a,b,c,d) per-layer (default)
+        - harmonizer(φ(x)) → (a,b,c,d)
       - SIREN trunk with per-layer modulation
       - three heads: distance, c1, c2
     '''
     def __init__(self,
+                 init_regime:  Optional[function] = None,
                  in_dim: int = 3,
                  layer_counts: Tuple[int,...] = (256,)*5,
                  # SIREN w0
@@ -146,8 +143,6 @@ class INCODE_NIR(nn.Module):
                  z_dim: int = 64, # Latent dimension 
                  # heads
                  class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32),
-                 head_layers: Tuple[int,...] = (),
-                 head_activation: Optional[nn.Module] = None,
                  bias: bool = True):
         super().__init__()
         self.learn_global_z = learn_global_z
@@ -162,30 +157,18 @@ class INCODE_NIR(nn.Module):
             harmonizer_in_dim = self.encoder.out_dim
             self.global_z = None
         
-        self.trunk = INCODETrunk(in_dim=in_dim, layer_counts=layer_counts,
+        self.trunk = INCODETrunk(init_regime=init_regime,in_dim=in_dim, layer_counts=layer_counts,
                                  w0_first=w0_first, w0_hidden=w0_hidden, bias=bias)
         self.harmonizer = Harmonizer(in_dim=harmonizer_in_dim,
                                      hidden_dims=harmonizer_hidden_dims,
                                      composer_layers=len(layer_counts),
                                      per_layer=per_layer)
 
-        # Heads
-        act = head_activation if head_activation is not None else nn.SiLU()
-        def init_linear(m: nn.Module):
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None: nn.init.zeros_(m.bias)
-
-        in_feat = layer_counts[-1]
         def make_head(out_dim: int):
-            layers = []
-            prev = in_feat
-            for hdim in head_layers:
-                layers += [nn.Linear(prev, hdim), act]
-                prev = hdim
-            layers += [nn.Linear(prev, out_dim)]
-            seq = nn.Sequential(*layers)
-            seq.apply(init_linear); return seq
+            layer = nn.Linear(layer_counts[-1], out_dim)
+            if init_regime is not None:
+                init_regime(layer, -1, params=(w0_hidden))
+            return layer
 
         if class_cfg.class_mode == "ecoc":
             out_c1 = out_c2 = class_cfg.n_bits

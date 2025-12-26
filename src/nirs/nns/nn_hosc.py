@@ -6,6 +6,7 @@ import torch.nn as nn
 from .nir import NIRLayer
 
 class Hosc(nn.Module):
+    '''σ(x) = tanh(β*sin(x)), β>0.'''
     def __init__(self, beta=8.0, adaptive = False): 
         super().__init__()
         self.adaptive = adaptive
@@ -24,21 +25,9 @@ class HOSCLayer(NIRLayer):
         beta (float): sharpness (>0), fixed (HOSC baseline).
     Args:
         adaptive (bool): If true, makes beta a learneable parameter.
-    
-    Notes:
-      - Per the paper, no special 'frequency init' or PE is needed.
-      - We use Xavier-normal for weights and zero bias.
     '''
     def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True, is_last=False, adaptive = False):
         self.beta = params[0]
         super().__init__(Hosc(self.beta, adaptive), in_dim, out_dim, ith_layer, bias, is_last=is_last)
         if not adaptive:
             self.register_buffer(f"beta{ith_layer}", torch.tensor(float(self.beta)))
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        # Xavier/Glorot normal; bias = 0
-        nn.init.xavier_normal_(self.linear.weight)
-        if self.linear.bias is not None:
-            nn.init.zeros_(self.linear.bias)

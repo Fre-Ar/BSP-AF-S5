@@ -5,8 +5,8 @@ import torch.nn as nn
 
 from .nir import NIRLayer
 
-#  sin( ω(|x|+1)x )
 class Finer(nn.Module):
+    '''σ(x) = sin( ω(|x|+1)x )'''
     def __init__(self, w=torch.pi): 
         super().__init__()
         self.w = w
@@ -22,22 +22,8 @@ class FINERLayer(NIRLayer):
         w (float): frequency multiplier ω.
 
     '''
-    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True, is_last=False, bias_range_k: float = 5.0):
+    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True, is_last=False):
         self.w = params[0]
-        self.bias_range_k = float(bias_range_k)
+        self.bias_k = params[1]
         super().__init__(Finer(self.w), in_dim, out_dim, ith_layer, bias, is_last=is_last)
         self.register_buffer(f"w{ith_layer}", torch.tensor(float(self.w)))
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        # ---- SIREN-style weight init, scaled by 1/ω0 ----
-        # W ~ U(-sqrt(6/fan_in)/ω0, +sqrt(6/fan_in)/ω0)
-        bound = torch.sqrt(6.0 / self.in_dim) / (float(self.w) if self.w != 0 else 1.0)
-        with torch.no_grad():
-            self.linear.weight.uniform_(-bound, bound)
-
-        # ---- FINER bias init: b ~ U(-k, k) with k > 0 ----
-        if self.linear.bias is not None:
-            with torch.no_grad():
-                self.linear.bias.uniform_(-self.bias_range_k, self.bias_range_k)

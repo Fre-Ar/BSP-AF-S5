@@ -1,26 +1,13 @@
 # src/nirs/nns/nn_siren.py
 
-import math
 import torch
 import torch.nn as nn
 
 from .nir import NIRLayer
 
-# ---------------------------
-# SIREN-style initialization
-# ---------------------------
-def init_siren_linear(linear: nn.Linear, in_dim: int, ith_layer: int, w: float = 1.0) -> None:
-    '''Weight/bias init per SIREN (Sitzmann et al., 2020).'''
-    with torch.no_grad():
-        if ith_layer == 0:
-            bound = 1.0 / in_dim
-        else:
-            bound = math.sqrt(6.0 / in_dim) / (w if w != 0 else 1.0)
-        linear.weight.uniform_(-bound, bound)
-        if linear.bias is not None:
-            linear.bias.zero_()
 
 class Sine(nn.Module):
+    '''σ(x) = sin(ω * x), ω>0 fixed.'''
     def __init__(self, w=1.0): 
         super().__init__()
         self.w = w
@@ -37,7 +24,6 @@ class SIRENLayer(NIRLayer):
         self.w = params[0]
         super().__init__(Sine(self.w), in_dim, out_dim, ith_layer, bias, is_last=is_last)
         self.register_buffer(f"w{ith_layer}", torch.tensor(float(self.w)))
-        init_siren_linear(self.linear, in_dim, ith_layer, w=self.w)
                 
                 
 class SIREN(nn.Module):

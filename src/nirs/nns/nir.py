@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .fourier_features import EncodingBase
+from .init_regimes import init_linear
 
 # ===================== NIR CORE =====================
 
@@ -27,13 +28,13 @@ class NIRLayer(nn.Module):
         if self.complex and (not torch.is_complex(x)):
             x = x.to(torch.cfloat)
         y = self.activation(self.linear(x))
-        if self.complex and self.is_last < 0:
+        if self.complex and self.is_last:
             y = y.real
         return y
 
 class NIRTrunk(nn.Module):
     '''Shared trunk used by all heads.'''
-    def __init__(self, layer: NIRLayer, encoder: Optional[EncodingBase], in_dim=3, layer_counts: tuple = (256,)*5, params: tuple = ((1.0,),)*5, encoder_params: Optional[tuple] = None):
+    def __init__(self, layer: NIRLayer, init_regime: Optional[function], encoder: Optional[EncodingBase], in_dim=3, layer_counts: tuple = (256,)*5, params: tuple = ((1.0,),)*5, encoder_params: Optional[tuple] = None):
         super().__init__()
         
         depth = len(layer_counts)
@@ -53,7 +54,13 @@ class NIRTrunk(nn.Module):
         layers += [layer(first_in, layer_counts[0], params=params[0], ith_layer=0)]
         for i in range(1, depth):
             layers += [layer(layer_counts[i-1], layer_counts[i], params=params[i], ith_layer=i, is_last=(i==depth-1))]
+        
+        if init_regime is not None:
+            for i in range(depth):
+                init_regime(layers[i].linear, i, params[i])
+            
         self.net = nn.Sequential(*layers)
+        
 
     def forward(self, x): 
         return self.net(x)
@@ -81,41 +88,31 @@ class MultiHeadNIR(nn.Module):
       - c1: classification (containing country via ECOC or softmax)
       - c2: classification (adjacent country via ECOC or softmax)
     '''
-    def __init__(self, layer: NIRLayer,
-                 encoder: Optional[EncodingBase] = None,
-                 in_dim=3,
-                 layer_counts: tuple = (256,)*5,
-                 params: tuple = (1.0,),
-                 encoder_params: Optional[tuple] = None,
-                 class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32),
-                 head_layers: tuple = (),
-                 head_activation: Optional[nn.Module] = None):
+    def __init__(
+        self, 
+        layer: NIRLayer,
+        init_regime:  Optional[function] = None,
+        encoder: Optional[EncodingBase] = None,
+        in_dim=3,
+        layer_counts: tuple = (256,)*5,
+        params: Optional[tuple] = None,
+        encoder_params: Optional[tuple] = None,
+        class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32)
+    ):
         super().__init__()
         # Trunk
         self.class_cfg = class_cfg
-        self.trunk = NIRTrunk(layer, encoder, in_dim, layer_counts, params=params, encoder_params=encoder_params)
+        self.trunk = NIRTrunk(layer, init_regime, encoder, in_dim, layer_counts, params=params, encoder_params=encoder_params)
         
-        act = head_activation if head_activation is not None else nn.ReLU(inplace=True)
+        def make_head(out_dim: int):
+            layer = nn.Linear(layer_counts[-1], out_dim)
+            if init_regime is not None:
+                if params:
+                    init_regime(layer, -1, params[-1])
+                else:
+                    init_regime(layer)
+            return layer
 
-        def _init_linear(m: nn.Module):
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-        
-        head_counts = (layer_counts[-1],) + head_layers
-
-        # Distance head
-        dist_layers = []
-        for i in range(1, len(head_counts)):
-            dist_layers += [nn.Linear(head_counts[i-1], head_counts[i]), act] 
-        dist_layers +=  [nn.Linear(head_counts[-1], 1)]    
-           
-        self.dist_head = nn.Sequential(*dist_layers)
-        self.dist_head.apply(_init_linear)
-        self.softplus = nn.Softplus()
-
-        
         # Classification heads
         if class_cfg.class_mode == "ecoc":
             assert class_cfg.n_bits is not None and class_cfg.n_bits > 0, "n_bits must be set for ECOC."
@@ -129,19 +126,11 @@ class MultiHeadNIR(nn.Module):
         else:  # pragma: no cover
             raise ValueError(f"Unknown class_mode={class_cfg.class_mode}")
         
-        c1_layers = []
-        for i in range(1, len(head_counts)):
-            c1_layers += [nn.Linear(head_counts[i-1], head_counts[i]), act] 
-        c1_layers +=  [nn.Linear(head_counts[-1], out_c1)]    
-        self.c1_head = nn.Sequential(*c1_layers)
-        self.c1_head.apply(_init_linear)
-
-        c2_layers = []
-        for i in range(1, len(head_counts)):
-            c2_layers += [nn.Linear(head_counts[i-1], head_counts[i]), act] 
-        c2_layers +=  [nn.Linear(head_counts[-1], out_c2)]  
-        self.c2_head = nn.Sequential(*c2_layers)
-        self.c2_head.apply(_init_linear)
+        self.dist_head = make_head(1)
+        self.c1_head   = make_head(out_c1)
+        self.c2_head   = make_head(out_c2)
+        self.softplus  = nn.Softplus()
+        
 
     def forward(self, x):
         h = self.trunk(x)              # (B, hidden)

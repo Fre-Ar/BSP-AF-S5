@@ -47,23 +47,30 @@ class EncodingBase(nn.Module, metaclass=abc.ABCMeta):
 class BasicEncoding(EncodingBase):
     '''
     Basic Fourier encoding:
-        γ(x) = [cos(2π s x), sin(2π s x)]
+        α = 2π
+        γ(x) = [cos(α * x), sin(α * x)]
     where s is an optional input scale.
 
     Args:
         in_dim (int): dimensionality of x
-        s (float): scales x (useful if x not in [0,1])
+        a (float): 2π by default, scales x (useful if x not in [0,1])
     '''
-    def __init__(self, in_dim: int, s: float = 1.0):
+    def __init__(
+        self,
+        in_dim: int,
+        alpha: float = 2.0 * math.pi,
+        sigma: float = 5.0, # sigma and m included for portability with the other 2 encodings
+        m: int = 256
+    ):
         super().__init__(in_dim)
-        self.two_pi_s = 2.0 * math.pi * s
+        self.alpha = alpha
 
     @property
     def out_dim(self) -> int:
         return 2 * self.in_dim
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
-        arg = self.two_pi_s * x                    # (B, D)
+        arg = self.alpha * x                    # (B, D)
         return torch.cat([torch.cos(arg), torch.sin(arg)], dim=-1)  # (B, 2D)
 
 # ----------------------------------------------------
@@ -72,20 +79,28 @@ class BasicEncoding(EncodingBase):
 class PositionalEncoding(EncodingBase):
     '''
     Deterministic Fourier features (Tancik et al., 2020):
-        γ(x) = concat_{k=0}^{m-1} [ sin(α * ω^(k/m) * x), cos(α * ω^(k/m) * x) ]
-    
-    Args:
-      - w (float): frequency hyperparameter
-      - m (int): embedding size
-      - α (float): Scaling factor. Use 1.0 for inputs in ~[-1,1]; use α = 2π for inputs in [0,1].
-      - include_input (bool): If True, include x in the embedding.
+        α = 2π
+        γ(x) = [x, …, cos(α * σ^(j/m)x),sin(α * σ^(j/m)x), …] for j∈{0,…,m-1}
+
+    Args
+    ----
+    in_dim : int
+        Dimensionality of x.
+    alpha : float
+        Scaling factor α. Use 1.0 for inputs in ~[-1,1]; use α = 2π for inputs in [0,1].
+    sigma : float
+        Frequency hyperparameter σ.
+    m : int
+        Embedding size aka Number of *(co)sines*. Total output size is 2mD (+D if include_input=True).
+    include_input : bool
+        Whether to prepend raw x.
     '''
     def __init__(
         self,
         in_dim: int,
-        m: int,
-        sigma: float = 2.0,
-        alpha: float = 1.0,
+        alpha: float = 2.0 * math.pi,
+        sigma: float = 5.0,
+        m: int = 256,
         include_input: bool = True,
     ):
         super().__init__(in_dim)
@@ -114,46 +129,38 @@ class PositionalEncoding(EncodingBase):
 class RandomGaussianEncoding(EncodingBase):
     '''
     Random Fourier Features (Tancik et al., 2020):
-        Sample B ∈ R^{m×D},  B_ij ~ N(0, σ^2)
-        γ(x) = [ cos( α x B^T), sin( α x B^T) ] / √m  (if l2_normalize=True) 
-
+        α = 2π
+        γ(x) = [cos(α * Bx), sin(α * Bx)] w/ B ∈ R^{m×D} ~ N(0, σ^2) fixed
+        
     Args
     ----
     in_dim : int
-    m : int
-        Embedding size aka Number of *(co)sines*. Total output is 2*m (+ D if include_input).
+        Dimensionality of x.
+    alpha : float
+        Scaling factor α. Use 1.0 for inputs in ~[-1,1]; use α = 2π for inputs in [0,1].
     sigma : float
         Std of Gaussian prior for B (controls frequency spread aka variance of normal distribution).
         Larger σ → higher-frequency features.
-    include_input : bool
-        Whether to concat raw x.
-
-    Notes
-    -----
-    - Uses 2π by default (natural for inputs normalized to [0,1]).
-      If your inputs are ~[-1,1], keeping 2π is still common; feel free to retune σ.
-    - Optionally scales output by 1/√m to keep variance roughly constant.
+    m : int
+        Embedding size aka Number of *(co)sines*. Total output size is 2m.
+    l2_normalize : bool
+        True by default. Whether to scale output by 1/√m to keep variance roughly constant.
     '''
     def __init__(
         self,
         in_dim: int,
-        m: int,
         alpha: float = 2.0 * math.pi,
-        sigma: float = 1.0,
-        learnable_B: bool = False,
-        l2_normalize: bool = True,
+        sigma: float = 10.0,
+        m: int = 256,
+        l2_normalize: bool = True
     ):
         super().__init__(in_dim)
         self.in_dim = in_dim
         self.m = m
         self.register_buffer("alpha", torch.tensor(float(alpha)))
-        self.l2_normalize = bool(l2_normalize)
 
         B = sigma * torch.randn(self.m, self.in_dim)
-        if learnable_B:
-            self.B = nn.Parameter(B)
-        else:
-            self.register_buffer("B", B)
+        self.register_buffer("B", B)
 
         scale = (1.0 / math.sqrt(self.m)) if (l2_normalize and self.m > 0) else 1.0
         self.register_buffer("scale", torch.tensor(scale))

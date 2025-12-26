@@ -6,7 +6,7 @@ from typing import Optional
 from .fourier_features import EncodingBase
 from .nir import NIRLayer, ClassHeadConfig
 
-
+# TODO: fix this class
 class SplitNIR(nn.Module):
     '''
     3 NIRs in a trench coat:

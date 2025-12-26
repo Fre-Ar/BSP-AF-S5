@@ -6,12 +6,14 @@ import torch.nn as nn
 from .nir import NIRLayer
 
 class Wire(nn.Module):
-    def __init__(self, w=1.0, s=1.0): 
+    '''σ(x) = exp( -|sx|^2 + iωx )
+            = exp( -|sx|^2 ) * exp( iωx )
+    ω,s>0 fixed.'''
+    def __init__(self, w=10.0, s=20.0): 
         super().__init__()
         self.w = w
         self.s = s
     def forward(self, x): 
-        # ψ(z) = e^{j ω z} * e^{-(s |z|)^2}
         carrier = torch.exp(1j * self.w * x)
         envelope = torch.exp(- (self.s * torch.abs(x))**2)
         return carrier * envelope  # complex output

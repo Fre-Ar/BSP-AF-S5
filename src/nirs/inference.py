@@ -16,10 +16,9 @@ class InferenceConfig:
     Configuration for a NIR model.
     """
     model_name: str
-    init_regime: str = "siren"
+    init_regime: str | None = None # None = default
     encoding: str | None = None
     layer_counts: tuple = (256,)*5
-    head_layers: tuple = ()
 
     # Model Hyperparameters
     w0: float = 30.0
@@ -32,7 +31,9 @@ class InferenceConfig:
     FR_f: float = 256.0
     FR_p: float = 8.0
     
-    encoder_params: tuple = (16, 2.0 * math.pi, 1.0)
+    encod_alpha: float = 2.0 * math.pi
+    encod_sigma: float = 5.0
+    encod_m: int = 256
     
     # Inference Settings
     label_mode: LabelMode = "ecoc"   # "ecoc" or "softmax"

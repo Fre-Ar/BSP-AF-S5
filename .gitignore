@@ -12,6 +12,7 @@ nn_checkpoints/
 *.DS_Store
 countries/
 raster/
+raster_old/
 color_extract.py
 training_old.py
 temp.py

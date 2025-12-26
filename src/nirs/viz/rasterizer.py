@@ -348,19 +348,29 @@ def raster(model_cfg: InferenceConfig,
         Predefined geographic region.
     """
     # --- predefined bboxes ---
-    if area == "lux":
-        lon_min, lon_max = 5.5, 6.7
-        lat_min, lat_max = 49.3, 50.3
+    match area:
+        case "lux":
+            lon_min, lon_max = 5.5, 6.7
+            lat_min, lat_max = 49.3, 50.3
 
-    elif area == "alpes":
-        lat_max, lon_min = 50.368711, 4.872894
-        lat_min, lon_max = 46.369837, 16.733645
+        case "alpes":
+            lat_max, lon_min = 50.368711, 4.872894
+            lat_min, lon_max = 46.369837, 16.733645
 
-    elif area == "nz":
-        lat_max, lon_min = -32.069493, 165.165747
-        lat_min, lon_max = -53.153157, 178.802075
-    else:
-        raise ValueError(f"Unknown area preset: {area!r}")
+        case "nz":
+            lat_max, lon_min = -32.069493, 165.165747
+            lat_min, lon_max = -53.153157, 178.802075
+        
+        case "globe":
+            lat_max, lon_min = 89.0, -179.0
+            lat_min, lon_max = -89.0, 179.0
+            
+        case "uk":
+            lat_max, lon_min = 61.5, -11.0
+            lat_min, lon_max = 49.5, 3.0
+        
+        case _:
+            raise ValueError(f"Unknown area preset: {area!r}")
 
     width = 1920
     height = bbox_height(width, lat_min, lat_max, lon_min, lon_max)

@@ -19,7 +19,6 @@ MODE = "softmax"
 DEPTH = 5
 LAYER = 512
 LAYER_COUNTS = (LAYER,)*DEPTH
-HEAD_LAYERS = ()
 
 W0 = 30.0 
 WH = 1.0
@@ -31,23 +30,27 @@ REG_HYPER = True
 FR_F = 256
 FR_P = 8
 
-ENCODER_PARAMS = (16, 2.0 * math.pi, 1.0)
+ENCOD_ALPHA = 2.0 * math.pi
+ENCOD_SIGMA = 5.0
+ENCOD_M = 256
 
 MODEL_CONFIG = InferenceConfig(
     MODEL, INIT_REGIME, ENCODING,
-    LAYER_COUNTS, HEAD_LAYERS,
+    LAYER_COUNTS, 
     W0, WH, S, BETA, K,
     GLOBAL_Z, REG_HYPER,
     FR_F ,FR_P,
-    ENCODER_PARAMS,
+    ENCOD_ALPHA, ENCOD_SIGMA, ENCOD_M,
     MODE, COUNTRIES_ECOC_PATH
 )
 
 TRAINING_POINTS = 1_000_000
+EPOCHS = 20
 
 model_path = get_model_path(
         model_cfg=MODEL_CONFIG,
-        n_training=TRAINING_POINTS,)    
+        n_training=TRAINING_POINTS,
+        max_epochs=EPOCHS)    
 MODEL_PATH = f"{CHECKPOINT_PATH}/{model_path}" 
 
 def train():
@@ -70,7 +73,7 @@ def train():
     train_and_eval(
         PATH,
         model_cfg=MODEL_CONFIG,
-        epochs=20,
+        epochs=EPOCHS,
         batch_size = 8192,
         traning_size = TRAINING_POINTS,
         #lr=3e-4,
@@ -100,7 +103,7 @@ def img():
         model_cfg=MODEL_CONFIG,
         checkpoint_path=MODEL_PATH,
         render = "c1",
-        area="alpes")
+        area="globe")
     
     dt = time.perf_counter() - t0
     print(f"Total rasterization time Elapsed: {dt:.3f}s")
