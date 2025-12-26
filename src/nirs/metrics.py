@@ -115,7 +115,7 @@ def compute_classification_metrics(
     class_ids : torch.Tensor
         Mapping from codebook index to raw Country ID [C]. Required for ECOC decoding.
     pos_weight : torch.Tensor or None
-        Positive weights for BCE loss, used to calculate decision thresholds in ECOC.
+        Positive weights for (B)CE loss, used to calculate decision thresholds in ECOC and class imbalances in Softmax.
     bits : torch.Tensor or None
         Ground truth bit vectors corresponding to `targets`. Shape [N, n_bits].
         Required if label_mode="ecoc" to compute BitAcc.
@@ -131,6 +131,8 @@ def compute_classification_metrics(
     device = logits.device
     targets = targets.to(device)
     target_dist_km = target_dist_km.to(device)
+    
+    bit_correct_vec = None
     
     # --- Global Pre-computation (Vectorized) ---
     # We decode everything once to get vectors of length N
@@ -166,8 +168,7 @@ def compute_classification_metrics(
         confs = top2_vals[:, 0]       # Top-1 probability
         gaps  = top2_vals[:, 0] - top2_vals[:, 1] # Margin
 
-        # TODO: This idx might not be the indices
-        id_pred = top2_idx[:, 0]
+        id_pred = top2_idx[:, 0] + 1
         
     # Helper for Aggregation
     def _calc_subset(mask, prefix):
@@ -177,8 +178,7 @@ def compute_classification_metrics(
         metrics[f"{prefix}T2Gap"] = gaps[mask].mean().item()
         metrics[f"{prefix}Conf"] = confs[mask].mean().item()
         
-        if bit_correct_vec is not None:
-            metrics[f"{prefix}BitAcc"] = bit_correct_vec[mask].mean().item()
+        metrics[f"{prefix}BitAcc"] = bit_correct_vec[mask].mean().item() if bit_correct_vec is not None else None
             
         # Compute Expensive stats (DecAcc, ECE, BalAcc)
         # Note: We pass the filtered tensors
@@ -275,8 +275,12 @@ def _compute_vectorized_stats(
     class_correct = torch.zeros(num_classes, device=device)
     class_total   = torch.zeros(num_classes, device=device)
     
-    class_total.scatter_add_(0, targets, torch.ones_like(targets, dtype=torch.float))
-    class_correct.scatter_add_(0, targets, correct)
+    # Targets must be 0..C-1
+    # Shift Raw IDs [1..289] -> Indices [0..288]
+    targets_idx = targets - 1
+    
+    class_total.scatter_add_(0, targets_idx, torch.ones_like(targets, dtype=torch.float))
+    class_correct.scatter_add_(0, targets_idx, correct)
     
     # Mean Recall of classes present in the batch
     mask = class_total > 0

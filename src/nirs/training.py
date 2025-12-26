@@ -21,7 +21,7 @@ from .loss import UncertaintyWeighting
 from .nns.nn_incode import INCODE_NIR as Incode
 from .nns.nir import ClassHeadConfig
 from .create_nirs import build_model
-from .engine import compute_potential_ecoc_pos_weights
+from .engine import compute_pos_weights
 from .data import make_dataloaders
 from .metrics import compute_distance_metrics, compute_classification_metrics
 from .inference import InferenceConfig
@@ -77,11 +77,13 @@ class Trainer:
 
         # Pre-instantiate loss functions to avoid re-creation
         self.mse_loss = nn.MSELoss(reduction="mean").to(device)
-        self.ce_loss = nn.CrossEntropyLoss(reduction="mean").to(device)
         
         # BCE with weights (if provided)
         self.bce_c1 = nn.BCEWithLogitsLoss(reduction="mean", pos_weight=pos_weight_c1).to(device)
         self.bce_c2 = nn.BCEWithLogitsLoss(reduction="mean", pos_weight=pos_weight_c2).to(device)
+        
+        self.ce_c1 = nn.CrossEntropyLoss(reduction="mean", weight=pos_weight_c1).to(device)
+        self.ce_c2 = nn.CrossEntropyLoss(reduction="mean", weight=pos_weight_c2).to(device)
 
         # Cache thresholds for ECOC evaluation to save compute
         self.thr1 = None
@@ -136,8 +138,13 @@ class Trainer:
             loss_c1 = self.bce_c1(c1_logits, batch["c1_bits"].to(self.device))
             loss_c2 = self.bce_c2(c2_logits, batch["c2_bits"].to(self.device))
         else:
-            loss_c1 = self.ce_loss(c1_logits, batch["c1_id"].to(self.device))
-            loss_c2 = self.ce_loss(c2_logits, batch["c2_id"].to(self.device))
+            # SOFTMAX FIX: Shift IDs from [1..289] to [0..288]
+            # to match the 0-indexed weights and logits.
+            target_c1 = batch["c1_id"].to(self.device) - 1
+            target_c2 = batch["c2_id"].to(self.device) - 1
+            
+            loss_c1 = self.ce_c1(c1_logits, target_c1)
+            loss_c2 = self.ce_c2(c2_logits, target_c2)
             
         return loss_dist, loss_c1, loss_c2
     
@@ -438,7 +445,7 @@ def train_and_eval(
     opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
     
     # 5. ECOC pos Weights 
-    pw_c1, pw_c2 = compute_potential_ecoc_pos_weights(parquet_path, codebook, model_cfg.label_mode)
+    pw_c1, pw_c2 = compute_pos_weights(parquet_path, codebook, class_cfg)
     
     # 6. Trainer Instance
     trainer = Trainer(

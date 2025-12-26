@@ -33,8 +33,7 @@ TRAINING_DATA_PATH = "src/geodata/parquet"
 CHECKPOINT_PATH = "src/checkpoints" 
 TRAINING_LOG_PATH = "src/logs"    
 DATA_ANALYSIS_PATH = "src/analysis" 
-
-METRICS_CSV = "src/analysis/metrics.csv"  
+METRICS_CSV = "metrics.csv"  
 
 # Dataset meta
 ECOC_BITS = 32

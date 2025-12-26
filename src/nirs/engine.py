@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Union
 import torch
 import numpy as np
+from pathlib import Path
+import pyarrow.parquet as pq
 
 from geodata.ecoc.ecoc import (
     load_ecoc_codes,
@@ -13,36 +15,92 @@ from geodata.ecoc.ecoc import (
     ecoc_decode,
     _prepare_codebook_tensor
 )
-from nirs.nns.nir import LabelMode
 from nirs.create_nirs import build_model
 from utils.utils import get_default_device
 from .inference import InferenceConfig, Prediction
+from .nns.nir import ClassHeadConfig
 
-def compute_potential_ecoc_pos_weights(
+def _compute_class_counts(
+    parquet_path: str | Path,
+    id_col: str = "c1_id",
+    n_classes: int = 289,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Computes prevalence of classes in a parquet file.
+
+    Parameters
+    ----------
+    parquet_path : str or Path
+        Path to Parquet file with a column `id_col` of integer class IDs.
+    id_col : str, optional
+        Name of the column containing class ids (e.g. "c1_id" or "c2_id").
+    n_classes : int
+        Total number of classes.
+
+    Returns
+    -------
+    ones : ndarray
+        (n_classes,) int64, total counts.
+    """
+    parquet_path = Path(parquet_path)
+     # init array
+    counts = np.zeros(n_classes, dtype=np.int64)
+
+    # read the data
+    pf = pq.ParquetFile(str(parquet_path))
+    for rg in range(pf.num_row_groups):
+        tbl = pf.read_row_group(rg, columns=[id_col])
+        ids = tbl[id_col].to_numpy(zero_copy_only=False)
+
+        # Bin counts. 
+        # minlength ensures we get a vector of at least size n_classes.
+        bc = np.bincount(ids, minlength=n_classes)
+        # bc will be len=290 if Ids are 1..289
+        
+        # We slice it back to match the expected model output size.
+        # All ids becomes id-1
+        bc = bc[1:]
+
+        counts += bc
+    
+    return counts
+
+def compute_pos_weights(
     parquet_path: str,
     codebook: dict,
-    label_mode: LabelMode):
+    class_cfg: ClassHeadConfig):
     """
-    Computes ECOC per-bit pos_weight for c1/c2 over a full parquet.
-    Returns None, None if label_mode == 'softmax'.
+    Computes pos_weight for c1/c2 over a full parquet.
+    Supports both ECOC per-bit pos_weights and softmax weights.
 
     Returns
     -------
     pw_c1, pw_c2 : torch.Tensor
-        Suitable for BCEWithLogitsLoss(pos_weight=...).
     """
     if codebook is None:
         return None, None
     
-    if label_mode == "ecoc":
+    if class_cfg.label_mode == "ecoc":
         # BCE bit prevalence correction
         ones_c1, totals_c1, p1_c1 = ecoc_prevalence_by_bit(parquet_path, codebook, id_col="c1_id")
         ones_c2, totals_c2, p1_c2 = ecoc_prevalence_by_bit(parquet_path, codebook, id_col="c2_id")
 
         pw_c1 = pos_weight_from_prevalence(p1_c1)
         pw_c2 = pos_weight_from_prevalence(p1_c2)
-    else:
-        pw_c1 = pw_c2 = None
+    else: # Softmax
+        # 1. Calculate counts for every class ID
+        # (You can implement a helper similar to ecoc_prevalence_by_bit but for ints)
+        counts_c1 = _compute_class_counts(parquet_path, "c1_id", class_cfg.n_classes_c1)
+        counts_c2 = _compute_class_counts(parquet_path, "c2_id", class_cfg.n_classes_c2)
+        
+        # 2. Inverse Frequency Weighting
+        # w_c = Total / (N_classes * count_c) is a standard balanced heuristic
+        # Add epsilon to avoid div by zero
+        w_c1 = counts_c1.sum() / (class_cfg.n_classes_c1 * (counts_c1 + 1))
+        w_c2 = counts_c2.sum() / (class_cfg.n_classes_c2 * (counts_c2 + 1))
+        
+        pw_c1 = torch.tensor(w_c1).float()
+        pw_c2 = torch.tensor(w_c2).float()
 
     return pw_c1, pw_c2
 
@@ -175,8 +233,10 @@ class Predictor:
             c2_ids = ecoc_decode(l_c2, self.codes_mat, self.class_ids, self.pw_c2, mode="soft")
         else:
             # Softmax Argmax
-            c1_ids = c1_logits.argmax(dim=1)
-            c2_ids = c2_logits.argmax(dim=1)
+            # Logits are indices [0..288]. Dataset IDs are [1..289].
+            # We MUST shift by +1 to return Raw IDs.
+            c1_ids = c1_logits.argmax(dim=1) + 1
+            c2_ids = c2_logits.argmax(dim=1) + 1
             
         return Prediction(
             dist_km=dist_km.cpu().numpy(),

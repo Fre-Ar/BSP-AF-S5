@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from nirs.nns.nir import ClassHeadConfig, LabelMode
 from geodata.ecoc.ecoc import load_ecoc_codes
-from utils.utils_geo import SEED
+from utils.utils_geo import SEED, NUM_COUNTRIES
 
 # ===================== DATA =====================
 
@@ -129,10 +129,9 @@ class BordersParquet(Dataset):
             if c in self.df:
                 self.df = self.df.drop(columns=[c])
         
-        # Class counts for softmax convenience (assume 0..max_id is dense
-        # TODO: fix softmax classes having no 0 index (and thus remove the +1 here).
-        self.num_classes_c1 = int(c1_id.max()) + 1
-        self.num_classes_c2 = int(c2_id.max()) + 1
+        # Class counts for softmax convenience
+        self.num_classes_c1 = NUM_COUNTRIES
+        self.num_classes_c2 = NUM_COUNTRIES
         
         self.c1_id = torch.as_tensor(c1_id, dtype=torch.long)
         self.c2_id = torch.as_tensor(c2_id, dtype=torch.long)

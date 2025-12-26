@@ -20,7 +20,7 @@ from nirs.engine import Predictor
 from nirs.inference import InferenceConfig
 from nirs.metrics import compute_classification_metrics, compute_distance_metrics
 from nirs.training import aggregate_params
-from utils.utils_geo import METRICS_CSV
+from utils.utils_geo import METRICS_CSV, DATA_ANALYSIS_PATH
 
 
 # -------------------------------------------------------------------
@@ -142,6 +142,7 @@ def visualize_model(
     show_plots: bool = True,
     overrides=None,
     
+    out_dir: str = DATA_ANALYSIS_PATH,
     metrics_csv: str = METRICS_CSV
 ):
     """
@@ -281,7 +282,7 @@ def visualize_model(
     
     num_params = sum(p.numel() for p in predictor.model.parameters())
     ckpt_cfg = predictor.ckpt.get("config", {})
-    epochs_trained = ckpt_cfg = predictor.ckpt.get("epoch", 0)
+    epochs_trained = predictor.ckpt.get("epoch", 0)
     
     global_meta = aggregate_params(
         model_cfg, 
@@ -293,11 +294,14 @@ def visualize_model(
         epochs_trained=epochs_trained)
     
     row = [{
-        '': global_meta
+        **global_meta,
+        **stats
     }]
-    csv_path = Path(metrics_csv)
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    csv_path = out_path / metrics_csv
     
-    df = pd.DataFrame([row])
+    df = pd.DataFrame(row)
     df.to_csv(
         csv_path,
         mode="a",                     # append

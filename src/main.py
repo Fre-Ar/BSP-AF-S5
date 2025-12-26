@@ -15,7 +15,7 @@ from utils.utils_geo import COUNTRIES_ECOC_PATH, TRAINING_DATA_PATH, CHECKPOINT_
 MODEL = "siren"
 INIT_REGIME = "siren"
 ENCODING = None
-MODE = "ecoc" 
+MODE = "softmax" 
 DEPTH = 5
 LAYER = 512
 LAYER_COUNTS = (LAYER,)*DEPTH
@@ -106,6 +106,6 @@ def img():
     print(f"Total rasterization time Elapsed: {dt:.3f}s")
 
 if __name__ == "__main__":
-    #train()
-    viz()
+    train()
+    #viz()
     #img()
