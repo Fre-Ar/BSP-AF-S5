@@ -1,7 +1,7 @@
 # src/nirs/nns/nn_fr.py
 
 import math
-from typing import Optional, Tuple, Type
+from typing import Optional, Callable, Type
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -193,7 +193,7 @@ class FR_NIR(nn.Module):
     '''
     def __init__(self,
                  activation: Type[nn.Module],
-                 init_regime:  Optional[function] = None,
+                 init_regime:  Optional[Callable] = None,
                  in_dim: int = 3,
                  hidden_dim: int = 256,
                  depth: int = 5, # total num of learned linear layers = len(layer_counts) + 1

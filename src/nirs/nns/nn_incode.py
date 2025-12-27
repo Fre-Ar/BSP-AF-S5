@@ -1,7 +1,7 @@
 # src/nirs/nns/nn_incode.py
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Callable
 
 from .nir import ClassHeadConfig
 from .fourier_features import RandomGaussianEncoding as RFF
@@ -66,7 +66,7 @@ class INCODETrunk(nn.Module):
     If scalars a,b,c,d are (B,1), they broadcast; if per-layer, pass (B, L, 1).
     '''
     def __init__(self,
-                 init_regime:  Optional[function] = None,
+                 init_regime:  Optional[Callable] = None,
                  in_dim: int = 3,
                  layer_counts: Tuple[int,...] = (256,)*5,
                  w0_first: float = 30.0,
@@ -126,7 +126,7 @@ class INCODE_NIR(nn.Module):
       - three heads: distance, c1, c2
     '''
     def __init__(self,
-                 init_regime:  Optional[function] = None,
+                 init_regime:  Optional[Callable] = None,
                  in_dim: int = 3,
                  layer_counts: Tuple[int,...] = (256,)*5,
                  # SIREN w0

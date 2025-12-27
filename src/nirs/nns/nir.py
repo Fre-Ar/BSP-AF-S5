@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from typing import Optional
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Callable
 
 from .fourier_features import EncodingBase
 from .init_regimes import init_linear
@@ -34,7 +34,7 @@ class NIRLayer(nn.Module):
 
 class NIRTrunk(nn.Module):
     '''Shared trunk used by all heads.'''
-    def __init__(self, layer: NIRLayer, init_regime: Optional[function], encoder: Optional[EncodingBase], in_dim=3, layer_counts: tuple = (256,)*5, params: tuple = ((1.0,),)*5, encoder_params: Optional[tuple] = None):
+    def __init__(self, layer: NIRLayer, init_regime: Optional[Callable], encoder: Optional[EncodingBase], in_dim=3, layer_counts: tuple = (256,)*5, params: tuple = ((1.0,),)*5, encoder_params: Optional[tuple] = None):
         super().__init__()
         
         depth = len(layer_counts)
@@ -91,7 +91,7 @@ class MultiHeadNIR(nn.Module):
     def __init__(
         self, 
         layer: NIRLayer,
-        init_regime:  Optional[function] = None,
+        init_regime:  Optional[Callable] = None,
         encoder: Optional[EncodingBase] = None,
         in_dim=3,
         layer_counts: tuple = (256,)*5,

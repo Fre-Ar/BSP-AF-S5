@@ -17,7 +17,7 @@ INIT_REGIME = "siren"
 ENCODING = None
 MODE = "softmax" 
 TOTAL_LAYERS = 5 # number of total layers = depth = n_hidden + 2
-WIDTH = 512
+WIDTH = 256
 # layer_counts is the layout of the NIR trunk. 
 # len(layer_counts) is the number of activation function modules.
 LAYER_COUNTS = (WIDTH,)*(TOTAL_LAYERS-1)

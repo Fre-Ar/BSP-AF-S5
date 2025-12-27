@@ -1,7 +1,7 @@
 # src/nirs/nns/nn_mfn
 
 import math
-from typing import Literal, Optional
+from typing import Literal, Optional, Callable
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,7 +21,7 @@ class FourierFilter(nn.Module):
                  out_dim: int,
                  depth: int, 
                  weight_scale: int = 1.0,
-                 init_regime:  Optional[function] = None,     
+                 init_regime:  Optional[Callable] = None,     
         ):
         super().__init__()
         self.in_dim = in_dim
@@ -56,7 +56,7 @@ class GaborFilter(nn.Module):
                  gamma_beta: float  = 1.0,
                  input_min: float = -1.0,
                  input_max: float =  1.0,
-                 init_regime:  Optional[function] = None,     
+                 init_regime:  Optional[Callable] = None,     
         ):
         super().__init__()
         self.in_dim = in_dim
@@ -124,8 +124,8 @@ class MFNTrunk(nn.Module):
                  depth: int,
                  filter_type: Literal['fourier', 'gabor'] = 'fourier',
                  weight_scale: float = 1.0,
-                 linear_init_regime:  Optional[function] = None,
-                 filter_init_regime:  Optional[function] = None,
+                 linear_init_regime:  Optional[Callable] = None,
+                 filter_init_regime:  Optional[Callable] = None,
                  ):
         super().__init__()
         assert depth >= 1, "depth must be ≥ 1"
@@ -172,8 +172,8 @@ class MFN_NIR(nn.Module):
                  depth: int, # total num of learned linear layers = len(layer_counts) + 1
                  filter_type: Literal['fourier', 'gabor'] = 'fourier',
                  weight_scale: float = 1.0,
-                 linear_init_regime:  Optional[function] = None,
-                 filter_init_regime:  Optional[function] = None,
+                 linear_init_regime:  Optional[Callable] = None,
+                 filter_init_regime:  Optional[Callable] = None,
                  class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32)
                  ):
         super().__init__()

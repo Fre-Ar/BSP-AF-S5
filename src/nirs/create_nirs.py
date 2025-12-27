@@ -1,6 +1,6 @@
 
 import math
-from typing import Tuple, Type, Optional, Any, Dict
+from typing import Tuple, Type, Optional, Callable, Dict
 
 import torch.nn as nn
 from .nns.nn_siren import SIRENLayer, Sine
@@ -57,7 +57,7 @@ ENCODER_REGISTRY: Dict[str, Type] = {
 }
 
 # Maps config string names to Init linear functions
-INIT_REGISTRY: Dict[str, function] = {
+INIT_REGISTRY: Dict[str, Callable] = {
     "siren": init_siren_linear,
     "default": init_linear,
     "reset": init_reset,

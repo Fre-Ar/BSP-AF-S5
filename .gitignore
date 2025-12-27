@@ -13,8 +13,10 @@ nn_checkpoints/
 countries/
 raster/
 raster_old/
+raster_other/
 color_extract.py
 training_old.py
+metrics_old.csv
 temp.py
 
 # Byte-compiled / optimized / DLL files
