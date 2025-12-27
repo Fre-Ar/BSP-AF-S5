@@ -17,7 +17,6 @@ def init_siren_linear(m: nn.Module, ith_layer: int, params: tuple) -> None:
     if ith_layer == 0:
         bound = 1.0 / m.in_features
     else:
-        # TODO: verify if this is the actual correct init again
         bound = np.sqrt(6.0 / m.in_features) / (w if w != 0 else 1.0)
     m.weight.uniform_(-bound, bound)
     # biases are left at default

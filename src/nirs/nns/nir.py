@@ -57,7 +57,7 @@ class NIRTrunk(nn.Module):
         
         if init_regime is not None:
             for i in range(depth):
-                init_regime(layers[i].linear, i, params[i])
+                init_regime(layers[i].linear, i, params[0])
             
         self.net = nn.Sequential(*layers)
         
@@ -108,7 +108,7 @@ class MultiHeadNIR(nn.Module):
             layer = nn.Linear(layer_counts[-1], out_dim)
             if init_regime is not None:
                 if params:
-                    init_regime(layer, -1, params[-1])
+                    init_regime(layer, -1, params[0])
                 else:
                     init_regime(layer)
             return layer

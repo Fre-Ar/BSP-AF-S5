@@ -22,7 +22,7 @@ WIDTH = 256
 # len(layer_counts) is the number of activation function modules.
 LAYER_COUNTS = (WIDTH,)*(TOTAL_LAYERS-1)
 
-W0 = 30.0 
+W0 = 70.0 
 WH = 1.0
 S = 7.07
 BETA = 8.0

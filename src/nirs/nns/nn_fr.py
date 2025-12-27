@@ -138,7 +138,7 @@ class FRTrunk(nn.Module):
         freq: int = 256,
         phases: int = 8,
         alpha: float = 0.05,
-        act_params: list = [],
+        act_params: tuple = (),
         lambda_denom=1.0,
     ):
         super().__init__()
@@ -206,27 +206,30 @@ class FR_NIR(nn.Module):
         super().__init__()
         
         # Getting activation module params
-        act_params = []
+        act_params = ()
         if params:
             param1 = params[0]
-            act_params.append(param1)
+            act_params = (param1,)
             if len(params) > 1:
                 param2 = params[1]
-                act_params.append(param2)
+                act_params = (param2,)
             else:
                 param2 = param1
         else:
             param1 = 1.0
             param2 = param1
 
-        def make_lin(in_dim: int, out_dim: int, param: float):
+        def make_lin(in_dim: int, out_dim: int, ith: int =-1):
             layer = nn.Linear(in_dim, out_dim)
             if init_regime is not None:
-                init_regime(layer, -1, params=(param))
+                init_regime(layer, ith, params=(param1))
             return layer
         
-        input = make_lin(in_dim, hidden_dim, param1)
-        act = activation(*act_params)
+        input = make_lin(in_dim, hidden_dim, ith=0)
+        if act_params:
+            act = activation(param1)
+        else:
+            act = activation()
         in_modules = [input, act]
         self.input = nn.Sequential(*in_modules)
         
@@ -238,7 +241,7 @@ class FR_NIR(nn.Module):
             phases=phases,
             alpha=alpha,
             act_params=act_params,
-            lambda_denom=param2
+            lambda_denom=param1
         )
         
         if class_cfg.class_mode == "ecoc":
@@ -249,9 +252,9 @@ class FR_NIR(nn.Module):
         else:
             raise ValueError(f"Unknown class_mode={class_cfg.class_mode}")
 
-        self.dist_head = make_lin(hidden_dim, 1,      param2)
-        self.c1_head   = make_lin(hidden_dim, out_c1, param2)
-        self.c2_head   = make_lin(hidden_dim, out_c2, param2)
+        self.dist_head = make_lin(hidden_dim, 1,    )
+        self.c1_head   = make_lin(hidden_dim, out_c1)
+        self.c2_head   = make_lin(hidden_dim, out_c2)
         self.softplus  = nn.Softplus()
         
     def forward(self, x: torch.Tensor):
