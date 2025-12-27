@@ -19,7 +19,7 @@ class NIRLayer(nn.Module):
         self.out_dim = out_dim
         self.ith_layer = ith_layer
         self.is_last = is_last
-        self.complex = complex
+        self.complex = complex # TODO: complex is a keyword class in python, change this
         dtype = torch.cfloat if complex else torch.get_default_dtype()
         self.linear = nn.Linear(in_dim, out_dim, bias=bias, dtype=dtype)
         self.activation = activation

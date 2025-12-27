@@ -156,45 +156,6 @@ class MFNTrunk(nn.Module):
             z = self.linears[i](z) * self.filters[i+1](x)  # elementwise ∘
         return z                                        # (B, width)
 
-
-# -----------------------------
-# Heads
-# -----------------------------
-class DistanceHead(nn.Module):
-    '''Tiny head for distance; Softplus to keep ≥0 (change if you prefer raw km logits).'''
-    def __init__(self, in_dim: int, hidden: Optional[int] = None):
-        super().__init__()
-        if hidden:
-            self.net = nn.Sequential(
-                nn.Linear(in_dim, hidden),
-                nn.ReLU(inplace=True),
-                nn.Linear(hidden, 1),
-            )
-        else:
-            self.net = nn.Linear(in_dim, 1)
-        self.out_act = nn.Softplus(beta=1.0)  # smooth ReLU
-
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        return self.out_act(self.net(z))
-
-
-class ClassHead(nn.Module):
-    '''Simple linear (or 2-layer) logits head.'''
-    def __init__(self, in_dim: int, out_dim: int, hidden: Optional[int] = None):
-        super().__init__()
-        if hidden:
-            self.net = nn.Sequential(
-                nn.Linear(in_dim, hidden),
-                nn.ReLU(inplace=True),
-                nn.Linear(hidden, out_dim),
-            )
-        else:
-            self.net = nn.Linear(in_dim, out_dim)
-
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        return self.net(z)  # logits (use BCEWithLogits/CE outside)
-
-
 # -----------------------------
 # Full MFN-NIR (3 heads)
 # -----------------------------
@@ -204,19 +165,11 @@ class MFN_NIR(nn.Module):
       - distance head -> (B,1)
       - c1 head -> (B, n_bits or n_classes)
       - c2 head -> (B, n_bits or n_classes)
-
-    Example:
-      model = MFN_NIR(
-          in_dim=3, width=256, depth=6,
-          filter_type='gabor',        # or 'fourier'
-          dist_hidden=128,
-          c_bits=32
-      )
     '''
     def __init__(self,
                  in_dim: int,
                  width: int,
-                 depth: int,
+                 depth: int, # total num of learned linear layers = len(layer_counts) + 1
                  filter_type: Literal['fourier', 'gabor'] = 'fourier',
                  weight_scale: float = 1.0,
                  linear_init_regime:  Optional[function] = None,
@@ -224,7 +177,14 @@ class MFN_NIR(nn.Module):
                  class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32)
                  ):
         super().__init__()
-        self.trunk = MFNTrunk(in_dim, width, depth, filter_type)
+        self.trunk = MFNTrunk(
+            in_dim,
+            width,
+            depth,
+            filter_type,
+            weight_scale=weight_scale,
+            linear_init_regime=linear_init_regime,
+            filter_init_regime=filter_init_regime)
         
         def make_head(out_dim: int):
             layer = nn.Linear(width, out_dim)
@@ -244,10 +204,6 @@ class MFN_NIR(nn.Module):
         self.c1_head   = make_head(out_c1)
         self.c2_head   = make_head(out_c2)
         self.softplus  = nn.Softplus()
-        
-        #self.head_dist = DistanceHead(width, hidden=dist_hidden)
-        #self.head_c1   = ClassHead(width, out_dim=c_bits, hidden=cls_hidden)
-        #self.head_c2   = ClassHead(width, out_dim=c_bits, hidden=cls_hidden)
 
     def forward(self, x: torch.Tensor):
         '''

@@ -1,132 +1,129 @@
 # src/nirs/nns/nn_fr.py
 
 import math
-from typing import Optional, Tuple, Literal, List
+from typing import Optional, Tuple, Type
 import torch
 import torch.nn as nn
-
-
-# -----------------------------
-# Fourier Basis 
-# -----------------------------
-def build_fourier_basis(
-    in_dim: int,
-    Ffreq: int,                 # F in the paper: frequency span
-    Pphases: int,               # P in the paper: number of phases
-    sampling_len_scale: float = 1.0,   # range length as multiple of Tmax (∈[0.5,4] works well)
-    device=None,
-    dtype=None,
-) -> torch.Tensor:
-    '''
-    Construct B ∈ R^{M × in_dim} with M = 2 * Ffreq * Pphases.
-      φ_p = 2π * p / P
-      ω_low  = {1/F, 2/F, ..., 1}
-      ω_high = {1, 2, ..., F}
-      z_j ∈ [ -Tmax/2, +Tmax/2 ], Tmax = 2π F  (uniform samples, j = 1..in_dim)
-
-    Returns:
-      B: (M, in_dim) fixed (register as buffer).
-    '''
-    # TODO: change device here
-    device = device if device is not None else torch.device("cpu")
-    dtype = dtype if dtype is not None else torch.get_default_dtype()
-
-    # sampling grid for the basis along the input dimension
-    Tmax = 2.0 * math.pi * Ffreq
-    L = sampling_len_scale * Tmax
-    z = torch.linspace(-0.5 * L, 0.5 * L, in_dim, device=device, dtype=dtype)  # (in_dim,)
-
-    # phases
-    phases = torch.linspace(0.0, 2.0 * math.pi * (Pphases - 1) / Pphases, Pphases, device=device, dtype=dtype)  # (P,)
-
-    # frequencies
-    low = torch.arange(1, Ffreq + 1, device=device, dtype=dtype) / Ffreq            # 1/F,...,1
-    high = torch.arange(1, Ffreq + 1, device=device, dtype=dtype)                   # 1,...,F
-
-    freqs = torch.cat([low, high], dim=0)  # (2F,)
-    # tile over phases → (2F*P,)
-    freqs = freqs.repeat_interleave(Pphases)
-    phis  = phases.repeat(2 * Ffreq)
-
-    # build B: for each row i, b_i = cos(ω_i * z + φ_i)
-    # broadcast: (M,1)*(1,D) + (M,1) → (M,D)
-    M = 2 * Ffreq * Pphases
-    B = torch.cos(freqs.view(M, 1) * z.view(1, in_dim) + phis.view(M, 1))
-    return B
-
+import torch.nn.functional as F
+from .nir import ClassHeadConfig
 
 # -----------------------------
 # FR Linear layer (train-time W = Λ B)
 # -----------------------------
-class FRLinear(nn.Module):
+class FRLayer(nn.Module):
     '''
     Fourier Reparameterized Linear:
       y = x @ (B^T) @ (Λ^T) + b
-    where B ∈ R^{M×Din} (fixed Fourier bases) and Λ ∈ R^{Dout×M} (learnable).
-
-    After training you may merge to a vanilla Linear by W_eff = Λ @ B.
+    where B ∈ R^{M×Din} (fixed Fourier bases) and Λ ∈ R^{out_dim×M} (learnable).
     '''
     def __init__(
         self,
-        in_features: int,
-        out_features: int,
-        *,
-        Ffreq: int = 16,
-        Pphases: int = 8,
-        sampling_len_scale: float = 1.0,
-        bias: bool = True,
-        device=None,
-        dtype=None,
+        in_dim: int,
+        out_dim: int,
+        freq: int = 256,
+        phases: int = 8,
+        alpha: float = 0.05,
+        lambda_denom=1.0
     ):
         super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.Ffreq = Ffreq
-        self.Pphases = Pphases
-        self.M = 2 * Ffreq * Pphases
-
-        B = build_fourier_basis(
-            in_features, Ffreq, Pphases, sampling_len_scale,
-            device=device, dtype=dtype
-        )  # (M, in_features)
-        self.register_buffer("B", B)  # fixed
-
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.freq = freq
+        self.phases = phases
+        self.alpha = alpha
+        self.M = 2 * freq * phases
+        
+        B = self._generate_basis(in_dim, freq, phases)  # (M, in_dim)
+        self.register_buffer("B", B)
+        
         # learnable coefficients Λ and bias
-        self.Lambda = nn.Parameter(torch.empty(out_features, self.M, device=device, dtype=dtype))
-        self.bias = nn.Parameter(torch.zeros(out_features, device=device, dtype=dtype)) if bias else None
-
-        self._init_lambda_uniform_per_basis_row()
+        self.Lambda = nn.Parameter(torch.empty(out_dim, self.M))
+        self.bias = nn.Parameter(torch.zeros(out_dim))
+        
+        self._init_lambda(denom=lambda_denom)
 
     @torch.no_grad()
-    def _init_lambda_uniform_per_basis_row(self):
+    def _generate_basis(self, in_dim, F_num, P_num):
+        '''
+        Construct B ∈ R^{M × in_dim} with M = 2 * F * P.
+        φ_p = 2π * p / P
+        ω_low  = {1/F, 2/F, ..., 1}
+        ω_high = {1, 2, ..., F}
+        z_j ∈ [ -Tmax/2, +Tmax/2 ], Tmax = 2π F  (uniform samples, j = 1..in_dim)
+
+        Returns:
+        B: (M, in_dim) fixed (register as buffer).
+        '''
+        dtype = torch.float32
+        # Frequencies: Low freq set {1/F...1} and High freq set {1...F}
+        # Note: Paper says "2F different frequencies"
+        freqs_high = torch.arange(1, F_num + 1, dtype=dtype)
+        freqs_low = torch.arange(1, F_num + 1, dtype=dtype) / F_num
+        all_freqs = torch.cat([freqs_low, freqs_high]) # Size: 2F
+        
+        # Phases: 0 to 2pi * (P-1)/P
+        phases = torch.arange(0, P_num, dtype=dtype) * (2 * math.pi / P_num)
+        
+        # Create grid of (ω, φ) pairs
+        # We need M = 2F * P combinations
+        # Meshgrid-like expansion
+        omega = all_freqs.repeat_interleave(P_num) # Repeat each freq P times
+        phi = phases.repeat(2 * F_num)             # Repeat phase sequence 2F times
+        
+        # Sampling range T_max = 2 * pi * F
+        T_max = 2 * math.pi * F_num
+        # Uniform sampling points z usually corresponding to input dimension
+        # Sample interval [-T_max/2, T_max/2]
+        z = torch.linspace(-0.5 * T_max, 0.5 * T_max, steps=in_dim)
+        
+        # Basis b_ij = cos(ω_i * z_j + φ_i)
+        # ω: (M, 1), z: (1, in_dim), φ: (M, 1)
+        B = torch.cos(omega.unsqueeze(1) * z.unsqueeze(0) + phi.unsqueeze(1))
+        return B * self.alpha # (M, in_dim)
+    
+    @torch.no_grad()
+    def _init_lambda(self, denom=1.0):
         '''
         Paper Eq.(7): λ_ij ~ U(-bound_j, +bound_j),
           bound_j = sqrt( 6 / ( M * sum_t B[j,t]^2 ) )
-        (ReLU case; similar scheme for Sin per supp. We use this safe default.)
         '''
-        row_norm_sq = (self.B ** 2).sum(dim=1) + 1e-8      # (M,)
-        bounds = torch.sqrt(6.0 / (self.M * row_norm_sq))  # (M,)
-        U = torch.rand_like(self.Lambda) * 2.0 - 1.0       # (-1,1)
-        self.Lambda.copy_(U * bounds.view(1, self.M))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, Din)
-        x_proj = x @ self.B.t()            # (B, M) = (B,Din) @ (Din,M)
-        y = x_proj @ self.Lambda.t()       # (B, Dout)
-        if self.bias is not None:
-            y = y + self.bias
-        return y
+        # Calculate L2 norm for each basis vector (dim=1 is in_dim, so we sum over in_dim)
+        # B shape is (M, in_dim). We want norm of each row b_i.
+        basis_norms = self.B.norm(p=2, dim=1) # Shape (M,)
+        
+        # We want to init Lambda[:, i] based on basis_norms[i]
+        # Standard bound for uniform is sqrt(6 / fan_in)
+        # Here effective "fan_in" is related to the basis energy.
+        
+        # Official code logic adapted to vectorization:
+        # bound_i = sqrt(6/M) / norm(b_i) / denom
+        
+        numerator = math.sqrt(6 / self.M)
+        bounds = numerator / (basis_norms * (denom if denom else 1.0))
+        
+        # Vectorized uniform init is tricky in PyTorch, loop is safer for clarity
+        for i in range(self.M):
+            b = bounds[i].item()
+            nn.init.uniform_(self.Lambda[:, i], -b, b)
 
     @torch.no_grad()
-    def merged_weight_bias(self) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def merged_weight_bias(self) -> nn.Linear:
         '''Return W_eff, b suitable for a vanilla Linear.'''
-        W_eff = self.Lambda @ self.B       # (Dout, Din)
-        b = self.bias.clone() if self.bias is not None else None
-        return W_eff, b
-
+        # Convert to standard nn.Linear for inference
+        linear = nn.Linear(self.in_dim, self.out_dim)
+        
+        linear.weight.data = self.Lambda @ self.B
+        linear.bias.data = self.bias.data
+        return linear
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, in_dim)
+        weight = self.Lambda @ self.B
+        y = F.linear(x, weight, self.bias)
+        return y
 
 # -----------------------------
-# FR trunk (stack of FRLinear + activation)
+# FR trunk (stack of FRLinear)
 # -----------------------------
 class FRTrunk(nn.Module):
     '''
@@ -135,38 +132,30 @@ class FRTrunk(nn.Module):
     '''
     def __init__(
         self,
-        in_dim: int = 3,
+        activation: Type[nn.Module],
         hidden_dim: int = 256,
-        depth: int = 5,
-        *,
-        act: Literal["relu", "sine"] = "relu",
-        Ffreq: int = 16,
-        Pphases: int = 8,
-        sampling_len_scale: float = 1.0,
-        bias: bool = True,
+        n_hidden_layers: int = 4,
+        freq: int = 256,
+        phases: int = 8,
+        alpha: float = 0.05,
+        act_params: list = [],
+        lambda_denom=1.0,
     ):
         super().__init__()
-        assert depth >= 2
-        self.depth = depth
-        self.act_kind = act
+        assert n_hidden_layers >= 1
+        self.n_hidden_layers = n_hidden_layers
 
-        layers: List[nn.Module] = []
-        dims = [in_dim] + [hidden_dim] * (depth - 1)
+        layers = []
 
-        for i in range(depth - 1):
-            layers.append(FRLinear(
-                dims[i], dims[i+1],
-                Ffreq=Ffreq, Pphases=Pphases,
-                sampling_len_scale=sampling_len_scale,
-                bias=bias
+        for _ in range(n_hidden_layers):
+            layers.append(FRLayer(
+                in_dim=hidden_dim,
+                out_dim=hidden_dim,
+                freq=freq, phases=phases,
+                alpha=alpha,
+                lambda_denom=lambda_denom
             ))
-            if act == "relu":
-                layers.append(nn.ReLU(inplace=True))
-            elif act == "sine":
-                # keep it simple; if you use SIREN-scale, handle outside
-                layers.append(nn.SiLU())  # smoother than ReLU; swap for custom Sine if you want
-            else:
-                raise ValueError("act must be 'relu' or 'sine'")
+            layers.append(activation(*act_params))
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -178,96 +167,102 @@ class FRTrunk(nn.Module):
         Produce a new nn.Sequential where every FRLinear is replaced by a vanilla nn.Linear
         with W_eff = ΛB, preserving activations. Use this to avoid FR overhead at test-time. 
         '''
-        merged: List[nn.Module] = []
+        merged = []
         for m in self.net:
-            if isinstance(m, FRLinear):
-                W, b = m.merged_weight_bias()
-                lin = nn.Linear(m.in_features, m.out_features, bias=b is not None)
-                lin.weight.copy_(W)
-                if b is not None:
-                    lin.bias.copy_(b)
-                merged.append(lin)
+            if isinstance(m, FRLayer):
+                merged.append(m.merged_weight_bias())
             else:
                 merged.append(m)
         return nn.Sequential(*merged)
-
-
-# -----------------------------
-# Simple heads (as in your other NIRs)
-# -----------------------------
-class TwoLayerHead(nn.Module):
-    def __init__(self, in_dim: int, out_dim: int, hidden_mult: float = 1.0, bias: bool = True):
-        super().__init__()
-        h = max(8, int(hidden_mult * in_dim))
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, h, bias=bias),
-            nn.SiLU(),
-            nn.Linear(h, out_dim, bias=True),
-        )
-        self._init()
-
-    @torch.no_grad()
-    def _init(self):
-        for m in self.net.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                nn.init.zeros_(m.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
 
 # -----------------------------
 # Full FR NIR (3 heads)
 # -----------------------------
 class FR_NIR(nn.Module):
     '''
-    Fourier Reparameterized Training NIR (Shi et al., CVPR'24) with 3 heads:
+    Fourier Reparameterized Training NIR (Shi et al., 2024) with 3 heads:
       - dist_head: regression (km) -> (B,1)
       - c1_head:  logits -> (B, C1) or (B, n_bits) for ECOC
       - c2_head:  logits -> (B, C2) or (B, n_bits) for ECOC
 
     Paper-faithful parts:
       * Train-time weight reparameterization W=ΛB with fixed Fourier bases (P phases, 2F freqs).
-      * Basis sampling on z ∈ [−Tmax/2, +Tmax/2], Tmax = 2πF.
+      * Basis sampling on z ∈ [-Tmax/2, +Tmax/2], Tmax = 2πF.
       * Λ initialization per Eq.(7); compatible with ReLU/Sin backbones.
       * At inference you can merge Λ and B to a standard Linear (no runtime cost increase).
     '''
     def __init__(self,
+                 activation: Type[nn.Module],
+                 init_regime:  Optional[function] = None,
                  in_dim: int = 3,
                  hidden_dim: int = 256,
-                 depth: int = 5,
-                 *,
-                 act: Literal["relu", "sine"] = "relu",
-                 Ffreq: int = 16,
-                 Pphases: int = 8,
-                 sampling_len_scale: float = 1.0,
-                 # heads
-                 dist_out_dim: int = 1,
-                 c1_out_dim: int = 32,
-                 c2_out_dim: int = 32,
-                 head_hidden_mult: float = 1.0,
-                 bias: bool = True):
+                 depth: int = 5, # total num of learned linear layers = len(layer_counts) + 1
+                 freq: int = 256,
+                 phases: int = 8,
+                 alpha: float = 0.05,
+                 params: Optional[tuple] = None, # params tuple (param1, param2, ...) for act function
+                 class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32)
+                ):
         super().__init__()
-        self.trunk = FRTrunk(
-            in_dim=in_dim, hidden_dim=hidden_dim, depth=depth,
-            act=act, Ffreq=Ffreq, Pphases=Pphases,
-            sampling_len_scale=sampling_len_scale, bias=bias
-        )
-        self.dist_head = TwoLayerHead(hidden_dim, dist_out_dim, hidden_mult=head_hidden_mult, bias=bias)
-        self.c1_head   = TwoLayerHead(hidden_dim, c1_out_dim,   hidden_mult=head_hidden_mult, bias=bias)
-        self.c2_head   = TwoLayerHead(hidden_dim, c2_out_dim,   hidden_mult=head_hidden_mult, bias=bias)
+        
+        # Getting activation module params
+        act_params = []
+        if params:
+            param1 = params[0]
+            act_params.append(param1)
+            if len(params) > 1:
+                param2 = params[1]
+                act_params.append(param2)
+            else:
+                param2 = param1
+        else:
+            param1 = 1.0
+            param2 = param1
 
+        def make_lin(in_dim: int, out_dim: int, param: float):
+            layer = nn.Linear(in_dim, out_dim)
+            if init_regime is not None:
+                init_regime(layer, -1, params=(param))
+            return layer
+        
+        input = make_lin(in_dim, hidden_dim, param1)
+        act = activation(*act_params)
+        in_modules = [input, act]
+        self.input = nn.Sequential(*in_modules)
+        
+        self.trunk = FRTrunk(
+            activation=activation,
+            hidden_dim=hidden_dim,
+            n_hidden_layers=depth-2, # depth = num of learned layers. Input and Heads are 2, so n_hidden_layers = depth-2
+            freq=freq,
+            phases=phases,
+            alpha=alpha,
+            act_params=act_params,
+            lambda_denom=param2
+        )
+        
+        if class_cfg.class_mode == "ecoc":
+            out_c1 = out_c2 = class_cfg.n_bits
+        elif class_cfg.class_mode == "softmax":
+            out_c1 = class_cfg.n_classes_c1
+            out_c2 = class_cfg.n_classes_c2
+        else:
+            raise ValueError(f"Unknown class_mode={class_cfg.class_mode}")
+
+        self.dist_head = make_lin(hidden_dim, 1,      param2)
+        self.c1_head   = make_lin(hidden_dim, out_c1, param2)
+        self.c2_head   = make_lin(hidden_dim, out_c2, param2)
+        self.softplus  = nn.Softplus()
+        
     def forward(self, x: torch.Tensor):
         if x.dim() == 1:
             x = x.unsqueeze(0)
-        feat = self.trunk(x)                 # (B, hidden_dim)
-        return {
-            "dist":      self.dist_head(feat),
-            "c1_logits": self.c1_head(feat),
-            "c2_logits": self.c2_head(feat),
-            "feat":      feat,
-        }
+        
+        z = self.trunk(self.input(x))              # (B, hidden_dim)
+        dist = self.softplus(self.dist_head(z))
+        c1   = self.c1_head(z)
+        c2   = self.c2_head(z)
+        return dist, c1, c2
 
     @torch.no_grad()
     def merged_for_inference(self) -> nn.Sequential:

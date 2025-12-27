@@ -2,13 +2,17 @@
 import math
 from typing import Tuple, Type, Optional, Any, Dict
 
-from .nns.nn_siren import SIRENLayer
+import torch.nn as nn
+from .nns.nn_siren import SIRENLayer, Sine
 from .nns.nn_relu import ReLULayer
 from .nns.nn_incode import INCODE_NIR
 from .nns.nn_gauss import GAUSSLayer
 from .nns.nn_hosc import HOSCLayer
 from .nns.nn_sinc import SINCLayer
+from .nns.nn_finer import FINERLayer
+from .nns.nn_wire import WIRELayer
 from .nns.nn_mfn import MFN_NIR
+from .nns.nn_fr import FR_NIR
 from .nns.fourier_features import BasicEncoding, PositionalEncoding, RandomGaussianEncoding
 from .nns.nir import MultiHeadNIR, ClassHeadConfig
 from .nns.nn_split import SplitNIR
@@ -35,6 +39,14 @@ LAYER_REGISTRY: Dict[str, Type] = {
     "gauss": GAUSSLayer,
     "hosc": HOSCLayer,
     "sinc": SINCLayer,
+    "finer": FINERLayer,
+    "wire": WIRELayer,
+}
+
+# Maps config string names to Activation Function Classes
+ACT_REGISTRY: Dict[str, Type] = {
+    "siren": Sine,
+    "relu": nn.ReLU,
 }
 
 # Maps config string names to Encoder Classes
@@ -62,7 +74,7 @@ def _get_layer_params(cfg: InferenceConfig) -> Optional[Tuple[Tuple[float, ...],
     Constructs the layer-wise parameter tuples required by MultiHeadNIR.
     Handles the logic for First Layer vs Hidden Layers (e.g. SIREN w0).
     """
-    n_layers = len(cfg.layer_counts)
+    n_layers = len(cfg.layer_counts) # trunk layers
     
     match cfg.model_name.lower():
         case "siren" | "split_siren":
@@ -80,6 +92,14 @@ def _get_layer_params(cfg: InferenceConfig) -> Optional[Tuple[Tuple[float, ...],
         case "sinc":
             # SINC: (w0) for all layers 
             return ((cfg.w0,),) * n_layers
+        
+        case "wire":
+            # WIRE: (w,s) for all layers
+            return ((cfg.w0, cfg.s),) * n_layers
+        
+        case "finer":
+            # FINER: (w,k) for all layers
+            return ((cfg.w0,cfg.k),) * n_layers
             
         case "relu":
             # ReLU doesn't need per-layer params
@@ -147,11 +167,33 @@ def _build_mfn(cfg: InferenceConfig, class_head_cfg: ClassHeadConfig):
     return MFN_NIR(
         in_dim=3,
         width=cfg.layer_counts[0],
-        depth=len(cfg.layer_counts),
+        depth=len(cfg.layer_counts)+1,
         filter_type=filter_name,
         weight_scale=1.0,
         linear_init_regime=init_regime,
         filter_init_regime=init_mfn_filter,
+        class_cfg=class_head_cfg
+    )
+    
+def _build_fr(cfg: InferenceConfig, class_head_cfg: ClassHeadConfig):
+    """Builds the FR architecture."""
+    act_name = cfg.model_name.split('_')[1]
+    act = ACT_REGISTRY.get(act_name)
+    init_regime = INIT_REGISTRY.get(cfg.init_regime.lower()) if cfg.init_regime else None
+
+    if act == "siren":
+        act_params = (cfg.w0,cfg.w_hidden) if (act == "siren") else ()
+    
+    return FR_NIR(
+        activation=act,
+        init_regime=init_regime,
+        in_dim=3,
+        hidden_dim=cfg.layer_counts[0],
+        depth=len(cfg.layer_counts)+1,
+        freq=cfg.FR_f,
+        phases=cfg.FR_p,
+        alpha=cfg.FR_alpha,
+        params=act_params,
         class_cfg=class_head_cfg
     )
 
@@ -242,6 +284,8 @@ def build_model(
         model = _build_standard_nir(model_cfg, class_cfg)
     elif name.startswith('mfn'): # mfn_fourier or mfn_gabor
         model = _build_mfn(model_cfg, class_cfg)
+    elif name.startswith('fr_'): # fr_relu or fr_siren
+        model = _build_fr(model_cfg, class_cfg)
     else:
         raise ValueError(f"Unknown model name: {model_cfg.model_name}")
     

@@ -16,9 +16,11 @@ MODEL = "siren"
 INIT_REGIME = "siren"
 ENCODING = None
 MODE = "softmax" 
-DEPTH = 5
-LAYER = 512
-LAYER_COUNTS = (LAYER,)*DEPTH
+TOTAL_LAYERS = 5 # number of total layers = depth = n_hidden + 2
+WIDTH = 512
+# layer_counts is the layout of the NIR trunk. 
+# len(layer_counts) is the number of activation function modules.
+LAYER_COUNTS = (WIDTH,)*(TOTAL_LAYERS-1)
 
 W0 = 30.0 
 WH = 1.0
@@ -29,6 +31,7 @@ GLOBAL_Z = False # False enables RFF latent Z code
 REG_HYPER = True
 FR_F = 256
 FR_P = 8
+FR_ALPHA = 0.01
 
 ENCOD_ALPHA = 2.0 * math.pi
 ENCOD_SIGMA = 5.0
@@ -39,7 +42,7 @@ MODEL_CONFIG = InferenceConfig(
     LAYER_COUNTS, 
     W0, WH, S, BETA, K,
     GLOBAL_Z, REG_HYPER,
-    FR_F ,FR_P,
+    FR_F ,FR_P, FR_ALPHA,
     ENCOD_ALPHA, ENCOD_SIGMA, ENCOD_M,
     MODE, COUNTRIES_ECOC_PATH
 )

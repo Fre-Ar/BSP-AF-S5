@@ -18,7 +18,9 @@ class InferenceConfig:
     model_name: str
     init_regime: str | None = None # None = default
     encoding: str | None = None
-    layer_counts: tuple = (256,)*5
+    layer_counts: tuple = (256,)*5 # layer_counts is the layout of the NIR trunk. 
+    # n_hidden layers will always be len(layer_counts)-1
+    # len(layer_counts) is the number of activation function modules.
 
     # Model Hyperparameters
     w0: float = 30.0
@@ -30,6 +32,7 @@ class InferenceConfig:
     regularize_hyperparams: bool = False
     FR_f: float = 256.0
     FR_p: float = 8.0
+    FR_alpha: float = 0.01
     
     encod_alpha: float = 2.0 * math.pi
     encod_sigma: float = 5.0

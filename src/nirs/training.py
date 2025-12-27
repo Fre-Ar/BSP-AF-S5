@@ -341,7 +341,7 @@ def aggregate_params(
         "model": model_cfg.model_name,
         "init": model_cfg.init_regime,
         "encoding": str(model_cfg.encoding),
-        "layers": pretty_tuple(model_cfg.layer_counts), 
+        "layer_counts": pretty_tuple(model_cfg.layer_counts), 
         "mode": model_cfg.label_mode,
         "lr": lr,
         "wd": weight_decay,

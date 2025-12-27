@@ -26,7 +26,7 @@ class HOSCLayer(NIRLayer):
     Args:
         adaptive (bool): If true, makes beta a learneable parameter.
     '''
-    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True, is_last=False, adaptive = False):
+    def __init__(self, in_dim: int, out_dim: int, params: tuple, ith_layer: int, bias=True, is_last=False, adaptive = True):
         self.beta = params[0]
         super().__init__(Hosc(self.beta, adaptive), in_dim, out_dim, ith_layer, bias, is_last=is_last)
         if not adaptive:
