@@ -25,8 +25,8 @@ class InferenceConfig:
     # Model Hyperparameters
     w0: float = 30.0
     w_hidden: float = 1.0
-    s: float = 1.0
-    beta: float = 1.0
+    s: float = 7.07
+    beta: float = 8.0
     k: float =  20.0
     global_z: bool = False
     regularize_hyperparams: bool = False

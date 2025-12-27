@@ -24,8 +24,8 @@ LAYER_COUNTS = (WIDTH,)*(TOTAL_LAYERS-1)
 
 W0 = 30.0 
 WH = 1.0
-S = 1.0
-BETA = 1.0
+S = 7.07
+BETA = 8.0
 K = 20.0
 GLOBAL_Z = False # False enables RFF latent Z code
 REG_HYPER = True
