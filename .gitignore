@@ -17,7 +17,9 @@ raster_other/
 color_extract.py
 training_old.py
 metrics_old.csv
+logs_old/
 temp.py
+db.sqlite3
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

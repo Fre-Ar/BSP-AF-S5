@@ -4,6 +4,7 @@ import math
 import pathlib
 import time
 import os
+import optuna
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -394,8 +395,9 @@ def setup_logging(
 # ===================== PUBLIC API =====================
 
 def train_and_eval(
-    parquet_path: str,
+    train_set_path: str,
     model_cfg: InferenceConfig,
+    eval_set_path: str | None = None,
     out_dir: str = CHECKPOINT_PATH,
     log_dir: str | os.PathLike = TRAINING_LOG_PATH,
     
@@ -409,7 +411,8 @@ def train_and_eval(
     use_uncertainty_loss_weighting: bool = False,
     
     val_lambda = 100,
-    device: str | None = None
+    device: str | None = None,
+    trial = None # used for optuna trials
 ):
     """
     Trains and evaluates a NIR architecture, saving the best out of all into a checkpoint.
@@ -427,13 +430,23 @@ def train_and_eval(
     uw = UncertaintyWeighting().to(device) if use_uncertainty_loss_weighting else None
 
     # 3. Data Loaders
-    train_loader, val_loader, class_cfg, codebook = make_dataloaders(
-        parquet_path=parquet_path,
+    train_loader, _, class_cfg, codebook = make_dataloaders(
+        parquet_path=train_set_path,
         label_mode=model_cfg.label_mode,
         codes_path=model_cfg.codes_path,
-        split=(0.9, 0.1),
+        split=(1.0, 0.0),
         batch_size=batch_size,
         codebook=None,
+        device=device
+    )
+    
+    _, val_loader, _, _ = make_dataloaders(
+        parquet_path=eval_set_path if eval_set_path else train_set_path,
+        label_mode=model_cfg.label_mode,
+        codes_path=model_cfg.codes_path,
+        split=(0.0, 1.0)  if eval_set_path else (0.9, 0.1),
+        batch_size=batch_size,
+        codebook=codebook,
         device=device
     )
 
@@ -445,7 +458,7 @@ def train_and_eval(
     opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
     
     # 5. ECOC pos Weights 
-    pw_c1, pw_c2 = compute_pos_weights(parquet_path, codebook, class_cfg)
+    pw_c1, pw_c2 = compute_pos_weights(train_set_path, codebook, class_cfg)
     
     # 6. Trainer Instance
     trainer = Trainer(
@@ -466,7 +479,7 @@ def train_and_eval(
     num_params = sum(p.numel() for p in model.parameters())
     
     global_meta, save_path, csv_path = setup_logging(
-        out_dir,log_dir,model_path,parquet_path,num_params,model_cfg,lr,weight_decay)
+        out_dir,log_dir,model_path,train_set_path,num_params,model_cfg,lr,weight_decay)
 
     history = []
     best_score = math.inf
@@ -528,7 +541,15 @@ def train_and_eval(
                 },
                 "epoch": ep
             }, save_path)
+        
+        # Optuna Pruning
+        if trial:
+            trial.report(val_score, ep)
+            if trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
     
     total_time = time.perf_counter() - start_time
     print(f"Done. Total Time: {total_time:.1f}s")
+    
+    return best_score
             

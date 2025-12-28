@@ -16,4 +16,6 @@ cartopy
 
 # Nice-to-have / used in code
 tqdm>=4.65
-xxhash>=3.2    
+xxhash>=3.2
+optuna   
+optuna-dashboard 
