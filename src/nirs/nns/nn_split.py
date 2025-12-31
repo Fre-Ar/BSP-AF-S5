@@ -1,7 +1,7 @@
 # src/nirs/nns/nn_split.py
 
 import torch.nn as nn
-from typing import Optional
+from typing import Optional, Callable, List
 
 from .fourier_features import EncodingBase
 from .nir import NIRLayer, ClassHeadConfig
@@ -13,33 +13,40 @@ class SplitNIR(nn.Module):
       - distance (km): regression (>= 0 via Softplus)
       - c1: classification (containing country via ECOC or softmax)
       - c2: classification (adjacent country via ECOC or softmax)
+      
     '''
-    def __init__(self, layer: NIRLayer,
-                 encoder: Optional[EncodingBase] = None,
-                 in_dim=3,
-                 layer_counts: tuple = (256,)*5,
-                 params: tuple = (1.0,),
-                 encoder_params: Optional[tuple] = None,
-                 class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32)):
+    # TODO: find a way to allow different trunks using different hyper params
+    def __init__(
+        self, 
+        layer: NIRLayer,
+        init_regime:  Optional[Callable] = None,
+        encoder: Optional[EncodingBase] = None,
+        in_dim=3,
+        layer_counts: tuple = (256,)*5,
+        params: Optional[tuple] = None,
+        encoder_params: Optional[tuple] = None,
+        class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32)
+    ):
         super().__init__()
         # Checks
         depth = len(layer_counts)
         assert depth >= 2
         if not params:
             params = ((),)*depth
-        assert len(params) == depth
+        
+        self.class_cfg = class_cfg
+        dist_params = params[0]
+        c1_params = params[1]
+        c2_params = params[2]
         
         # Encoding
         dist_layers = []
         c1_layers = []
         c2_layers = []
+        
+        self.encoder = None
         if encoder is not None:
             self.encoder = encoder(in_dim, *encoder_params)
-            
-            dist_layers += [self.encoder]
-            c1_layers += [self.encoder]
-            c2_layers += [self.encoder]
-            
             first_in = self.encoder.out_dim     
         else:
             first_in = in_dim
@@ -58,20 +65,13 @@ class SplitNIR(nn.Module):
         else:  # pragma: no cover
             raise ValueError(f"Unknown class_mode={class_cfg.class_mode}")
         
-        # Layer inits (unused for now)
-        def _init_linear(m: nn.Module):
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-        
         
         # Fill NIRs' layers
-        def fill_layers(layers, out_dim):
+        def fill_layers(layers, out_dim, params_tuple):
             # trunk
-            layers += [layer(first_in, layer_counts[0], params=params[0], ith_layer=0)]
+            layers += [layer(first_in, layer_counts[0], params=params_tuple[0], ith_layer=0)]
             for i in range(1, depth):
-                layers += [layer(layer_counts[i-1], layer_counts[i], params=params[i], ith_layer=i, is_last=(i==depth-1))]
+                layers += [layer(layer_counts[i-1], layer_counts[i], params=params_tuple[i], ith_layer=i, is_last=(i==depth-1))]
             # head
             layers +=  [nn.Linear(layer_counts[-1], out_dim)]    
             return layers
@@ -88,7 +88,8 @@ class SplitNIR(nn.Module):
 
        
     def forward(self, x):
-        dist = self.softplus(self.dist_net(x))  # (B,1) >= 0
-        c1_logits = self.c1_net(x)    # (B, n_c1)
-        c2_logits = self.c2_net(x)    # (B, n_c2)
+        z = self.encoder(x) if self.encoder else x
+        dist = self.softplus(self.dist_net(z))  # (B,1) >= 0
+        c1_logits = self.c1_net(z)    # (B, n_c1)
+        c2_logits = self.c2_net(z)    # (B, n_c2)
         return dist, c1_logits, c2_logits

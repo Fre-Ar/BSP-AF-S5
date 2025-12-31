@@ -291,3 +291,6 @@ def build_model(
     
     return model, save_path
 
+
+def get_model_size(depth: int, width: int):
+    return 4 * width + (depth-2)*(width * width + width) + (width+1) * 597 

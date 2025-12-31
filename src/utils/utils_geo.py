@@ -31,7 +31,9 @@ COUNTRIES_ECOC_PATH = os.path.join(FOLDER_PATH, "countries.ecoc.json")
 # Training data + checkpoints
 TRAINING_DATA_PATH = "src/geodata/parquet"   
 CHECKPOINT_PATH = "src/checkpoints" 
-TRAINING_LOG_PATH = "src/logs"    
+BEST_CHECKPOINT_PATH = "src/best-checkpoints" 
+TRAINING_LOG_PATH = "src/logs"
+BEST_LOGS_PATH = "src/best-logs"     
 DATA_ANALYSIS_PATH = "src/analysis" 
 METRICS_CSV = "metrics.csv"  
 

@@ -152,6 +152,8 @@ class Predictor:
         
         # ---- load checkpoint & config ----
         self.ckpt = torch.load(checkpoint_path, map_location="cpu")
+        ckpt_cfg = self.ckpt.get("config", {})
+        print(ckpt_cfg["uw"])
         
         # ---- build & load model ----
         self.model, _ = build_model(model_cfg=cfg)

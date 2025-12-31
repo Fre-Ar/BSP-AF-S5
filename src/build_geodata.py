@@ -45,7 +45,7 @@ def preprocess_borders():
 # Parquet File Creation
 # -----------------------------
 
-def create_training_data():
+def create_training_data(group_num:int=0):
     """
     100% uniform:
         100k points takes ~46s
@@ -60,11 +60,11 @@ def create_training_data():
     mp.set_start_method("spawn", force=True)
 
     t0 = time.perf_counter()
-    n = 1_000_000
+    n = 2_000_000
     path = make_dataset_parallel(
         n_total=n,
-        out_path=os.path.join(TRAINING_DATA_PATH, f"training_{human_int(n)}.parquet"),
-        mixture=(0.86, 0.14),
+        out_path=os.path.join(TRAINING_DATA_PATH, f"training/{human_int(n)}_{group_num:02d}.parquet"),
+        mixture=(0.0, 1.0),
         shards_per_total=32,
         max_workers=None,
         seed=None,
@@ -76,4 +76,5 @@ def create_training_data():
     print(f"Total time Elapsed: {dt:.3f}s")
 
 if __name__ == "__main__":
-    create_training_data()
+    for group_num in range(100): # 00 to 99
+        create_training_data(group_num=group_num)

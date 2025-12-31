@@ -119,7 +119,7 @@ class PositionalEncoding(EncodingBase):
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, D)
         xb = x.unsqueeze(1) * self.bands.view(1, -1, 1)     # (B, m, D)
-        enc = torch.cat([torch.sin(xb), torch.cos(xb)], dim=1)  # (B, 2m, D)
+        enc = torch.cat([torch.cos(xb), torch.sin(xb)], dim=1)  # (B, 2m, D)
         enc = enc.reshape(x.shape[0], -1)                   # (B, 2mD)
         return torch.cat([x, enc], dim=-1) if self.include_input else enc
 

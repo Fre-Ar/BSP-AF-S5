@@ -18,8 +18,10 @@ color_extract.py
 training_old.py
 metrics_old.csv
 logs_old/
+best-logs/
 temp.py
 db.sqlite3
+metrics.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -5,7 +5,7 @@ import time
 from nirs.viz.compare_data_viz import visualize_model
 from nirs.viz.rasterizer import raster
 from nirs.training import train_and_eval
-from utils.utils_geo import TRAINING_DATA_PATH
+from utils.utils_geo import TRAINING_DATA_PATH, BEST_LOGS_PATH
 from config import *
 
 def train():
@@ -30,9 +30,13 @@ def train():
         TRAIN_PATH,
         model_cfg=MODEL_CONFIG,
         eval_set_path=EVAL_PATH,
+        out_dir=BEST_CHECKPOINT_PATH,
+        log_dir=BEST_LOGS_PATH,
         epochs=EPOCHS,
-        batch_size = 8192,
+        batch_size = 2*8192,
         traning_size = TRAINING_POINTS,
+        lr=LR,
+        weight_decay=WD,
         #lr=3e-4,
         )
     dt = time.perf_counter() - t0
@@ -40,8 +44,8 @@ def train():
 
 def viz(pred: bool = False):  
     visualize_model(
-        parquet_path=os.path.join(TRAINING_DATA_PATH, "log_dataset_1M.parquet"),
-        #parquet_path=os.path.join(TRAINING_DATA_PATH, "eval_uniform_1M.parquet"),
+        #parquet_path=os.path.join(TRAINING_DATA_PATH, "log_dataset_1M.parquet"),
+        parquet_path=os.path.join(TRAINING_DATA_PATH, "eval_uniform_1M.parquet"),
         #parquet_path=os.path.join(TRAINING_DATA_PATH, "eval_border_1M.parquet"),
     
         checkpoint_path=MODEL_PATH,
@@ -60,13 +64,13 @@ def img():
         model_cfg=MODEL_CONFIG,
         checkpoint_path=MODEL_PATH,
         render = "c1",
-        area="globe")
+        area="uk")
     
     dt = time.perf_counter() - t0
     print(f"Total rasterization time Elapsed: {dt:.3f}s")
 
 if __name__ == "__main__":
     #pass
-    #train()
-    viz(True)
+    train()
+    #viz(True)
     #img()

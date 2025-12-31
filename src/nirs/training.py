@@ -26,6 +26,7 @@ from .engine import compute_pos_weights
 from .data import make_dataloaders
 from .metrics import compute_distance_metrics, compute_classification_metrics
 from .inference import InferenceConfig
+from .create_nirs import get_model_size
 
 from geodata.ecoc.ecoc import per_bit_threshold, _prepare_codebook_tensor
 from utils.utils import get_default_device, trimf, pretty_tuple
@@ -478,6 +479,13 @@ def train_and_eval(
     # 7. Logging Setup
     num_params = sum(p.numel() for p in model.parameters())
     
+    #print(num_params)
+    #d = len(model_cfg.layer_counts)+1
+    #w = model_cfg.layer_counts[0]
+    #print(get_model_size(d, w))
+    #print(f"{trimf(num_params*1e-6)}M")
+
+    
     global_meta, save_path, csv_path = setup_logging(
         out_dir,log_dir,model_path,train_set_path,num_params,model_cfg,lr,weight_decay)
 
@@ -522,7 +530,7 @@ def train_and_eval(
         
         # --- Print ---
         # Concise print
-        print(f"[{ep:02d}] T:{tr_stats['loss']} | V_RMSE:{trimf(rmse)} | V_BalAcc:{trimf(acc_c1,2)}/{trimf(acc_c2,2)} | Score:{trimf(val_score)}")
+        print(f"[{ep:02d}] T:{tr_stats['loss']} | V_RMSE:{trimf(rmse)} | V_BalAcc:{trimf(acc_c1,2)}/{trimf(acc_c2,2)} | Score:{trimf(val_score)} | Time: {epoch_time:.3f}s")
 
         # --- Save ---
         if val_score < best_score:
@@ -552,4 +560,3 @@ def train_and_eval(
     print(f"Done. Total Time: {total_time:.1f}s")
     
     return best_score
-            
