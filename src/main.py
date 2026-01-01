@@ -33,7 +33,7 @@ def train():
         out_dir=BEST_CHECKPOINT_PATH,
         log_dir=BEST_LOGS_PATH,
         epochs=EPOCHS,
-        batch_size = 2*8192,
+        batch_size = 16384,
         traning_size = TRAINING_POINTS,
         lr=LR,
         weight_decay=WD,

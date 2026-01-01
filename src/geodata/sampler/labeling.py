@@ -10,6 +10,7 @@ import time
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import defaultdict
+from typing import Callable
 
 # --- third-party
 import numpy as np
@@ -342,6 +343,220 @@ def _label_and_write_chunk(args):
         return ("err", {"error": str(e), "traceback": traceback.format_exc()})
 
 # --------------------------- public API -----------------------------
+
+def make_batch_datasets(
+    # main args
+    n_total_per_file: int,
+    num_files: int,
+    path_generator: Callable[[int], str],
+    mixture = (0.0, 1.0), # (near-border, uniform)
+    # multiprocessing knobs
+    shards_per_file: int = 24,
+    max_workers: int | None = None,
+    # sampling args
+    seed: int | None = SEED,
+    gpkg_path: str = GPKG_PATH,
+    countries_layer: str = COUNTRIES_LAYER,
+    id_field: str = ID_FIELD,
+    borders_fgb: str = BORDERS_FGB_PATH,
+    shuffle_points: bool = True,
+    # I/O knobs
+    tmp_subdir: str = "tmp_shards",
+    writer_row_group_size: int | None = 512_000,
+    # KNN knobs (propagate to workers)
+    knn_k: int = 128,
+    knn_expand: int = 256,
+    expand_rel: float = 1.05,
+) -> list[str]:
+    """
+    Generates multiple labeled border datasets with n_total_per_file samples in parallel and writes 
+    them to multiple Parquet files.
+    Reuses the same worker pool and sampler for efficiency.
+
+    Parameters
+    ----------
+    n_total_per_file : int
+        Number of samples per output file.
+    num_files : int
+        Number of separate files to generate.
+    path_generator : callable
+        Function taking (file_index) and returning the full output path string.
+    mixture : tuple
+        (near_border_fraction, uniform_fraction). Must sum to ~1.
+    shards_per_file : int
+        Approximate number of shards to split `n_total_per_file` into.
+    max_workers : int or None
+        Max worker processes for ProcessPoolExecutor. If None, uses (cpu_count - 1).
+    seed : int or None
+        RNG seed for reproducible sampling / shuffling.
+    gpkg_path, countries_layer, id_field, borders_fgb : str
+        Geodata file and layer names for countries and borders.
+    tmp_subdir : str
+        Temporary subdirectory under `out_path` directory for shard files.
+    writer_compression : str
+        Parquet compression codec for the final merged file.
+    writer_row_group_size : int or None
+        Row group size for Parquet writer; affects compressibility and IO.
+    shuffle_points : bool
+        If True, randomly permute the sample order before sharding.
+    knn_k, knn_expand, expand_rel : numeric
+        KNN shortlist parameters passed to BorderSampler.
+        
+    Returns
+    -------
+    list[str]
+        List of absolute paths to the generated files.
+    """
+    
+    generated_files = []
+    
+    # Ensure temporary directory exists (we reuse it for all files)
+    # We will use the directory of the first file to place the temp folder
+    first_path = path_generator(0)
+    out_dir_root = os.path.dirname(first_path) or "."
+    tmp_dir = os.path.join(out_dir_root, tmp_subdir)
+    os.makedirs(tmp_dir, exist_ok=True)
+    
+    rng = np.random.default_rng(seed)
+
+    # -----------------------------------------------------
+    # 1) Create shared sampler (parent process only; no labeling here)
+    # -----------------------------------------------------
+    t0_main = time.perf_counter()
+    print("Initializing parent BorderSampler...")
+    # create sampler
+    sampler_for_drawing = BorderSampler(
+        gpkg_path       = gpkg_path,
+        countries_layer = countries_layer,
+        id_field        = id_field,
+        borders_fgb     = borders_fgb,
+        knn_k           = knn_k,
+        knn_expand      = knn_expand,
+        expand_rel      = expand_rel,
+    )
+    print(f"Sampler creation done in {time.perf_counter() - t0_main:.3f}s. Starting batch generation of {num_files} files.")
+
+    # Determine workers
+    if max_workers is None:
+        try:
+            max_workers = max(1, (os.cpu_count() or 4) - 1)
+        except Exception:
+            max_workers = 4
+
+    # -----------------------------------------------------
+    # 2) Parallel labeling into temporary Parquet shards
+    # -----------------------------------------------------
+    # Spin up the ProcessPoolExecutor ONCE
+    # Workers will init their own BorderSampler once and reuse it for all files.
+    with ProcessPoolExecutor(
+        max_workers = max_workers,
+        mp_context  = mp.get_context("spawn"),
+        initializer = _init_worker,
+        initargs    = (gpkg_path, countries_layer, id_field, borders_fgb, knn_k, knn_expand, expand_rel),
+    ) as ex:
+        
+        for file_idx in range(num_files):
+            t0_file = time.perf_counter()
+            out_path = path_generator(file_idx)
+            
+            # Ensure output dir exists
+            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            
+            print(f"--- Generating File {file_idx+1}/{num_files}: {os.path.basename(out_path)} ---")
+
+            # A) Sample `n_border` points close to the borders
+            n_border = int(mixture[0] * n_total_per_file)
+            n_uniform = n_total_per_file - n_border
+
+            # near-border
+            (lon_b, lat_b, xyz_b, is_b_b, r_band_b, dkm_b, ida_b, idb_b) = \
+                _draw_near_border_points(sampler_for_drawing, n_border, rng)
+            
+            # B) Sample `n_uniform` points uniformly across the globe
+            
+            # Sample normal(0,1)^3 and normalize to the sphere
+            xyz_u = rng.normal(size=(n_uniform, 3)).astype(np.float64)
+            xyz_u = normalize_vec(xyz_u).astype(np.float32)
+            lon_u, lat_u = unitvec_to_lonlat(xyz_u)
+            is_b_u = np.zeros(n_uniform, np.uint8)
+            r_band_u = np.full(n_uniform, 255, np.uint8) # 255 marks 'uniform' bucket
+            dkm_u = np.zeros(n_uniform, np.float32)
+            ida_u = np.zeros(n_uniform, np.int32)
+            idb_u = np.zeros(n_uniform, np.int32)
+            
+            # C) Concatenate near-border and uniform samples
+            lon = np.concatenate([lon_b, lon_u]).astype(np.float32)
+            lat = np.concatenate([lat_b, lat_u]).astype(np.float32)
+            xyz = np.vstack([xyz_b, xyz_u]).astype(np.float32)
+            is_border = np.concatenate([is_b_b, is_b_u])
+            r_band    = np.concatenate([r_band_b, r_band_u])
+            dkm_hint  = np.concatenate([dkm_b, dkm_u]).astype(np.float32)
+            ida       = np.concatenate([ida_b, ida_u]).astype(np.int32)
+            idb       = np.concatenate([idb_b, idb_u]).astype(np.int32)
+
+            if shuffle_points:
+                perm = rng.permutation(len(lon))
+                lon, lat, xyz, is_border, r_band, dkm_hint, ida, idb = \
+                    lon[perm], lat[perm], xyz[perm], is_border[perm], r_band[perm], dkm_hint[perm], ida[perm], idb[perm]
+
+            # D) Submit chunks to executor
+            total_pts = len(lon)
+            shards = max(1, int(shards_per_file))
+            chunk_size = max(1, int(np.ceil(total_pts / shards)))
+            
+            futures = []
+            current_temp_paths = []
+            
+            for ci in range(shards):
+                # determine low and high bounds for chunk partitioning
+                lo = ci * chunk_size
+                hi = min((ci + 1) * chunk_size, total_pts)
+                if lo >= hi: 
+                    continue
+                
+                # Unique temp path for this chunk of this file
+                tmp_path = os.path.join(tmp_dir, f"f{file_idx}_part{ci:05d}.parquet")
+                
+                args = (
+                    gpkg_path, countries_layer, id_field, borders_fgb,
+                    lon[lo:hi], lat[lo:hi], xyz[lo:hi],
+                    is_border[lo:hi], r_band[lo:hi], dkm_hint[lo:hi],
+                    ida[lo:hi], idb[lo:hi],
+                    tmp_path, ci, knn_k, knn_expand, expand_rel
+                )
+                futures.append(ex.submit(_label_and_write_chunk, args))
+
+            # E) Wait for results
+            it = as_completed(futures)
+            # show progress bar
+            if tqdm: 
+                it = tqdm(it, total=len(futures), desc="Labeling shards")
+            
+            for f in it:
+                # aggregate worker stats and payloads
+                status, payload = f.result()
+                if status == "err":
+                    raise RuntimeError(f"Worker failed: {payload['error']}\n{payload['traceback']}")
+                current_temp_paths.append(payload["path"])
+                
+            # F) Concatenate shards into a single Parquet file
+            _concat_parquet_shards(current_temp_paths, out_path, row_group_size=writer_row_group_size)
+            
+            # G) Cleanup temporary files
+            for p in current_temp_paths:
+                try: os.remove(p)
+                except Exception: pass
+            
+            generated_files.append(os.path.abspath(out_path))
+            print(f"File {file_idx+1} completed in {time.perf_counter() - t0_file:.2f}s")
+            
+    # Cleanup temp dir
+    try: os.rmdir(tmp_dir)
+    except Exception: pass
+    
+    print(f"Batch generation finished. Total time: {time.perf_counter() - t0_main:.2f}s")
+    return generated_files
+
 
 def make_dataset_parallel(
     # main args
