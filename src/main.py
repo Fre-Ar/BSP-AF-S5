@@ -2,6 +2,8 @@
 import os
 import time
 
+import torch
+
 from nirs.viz.compare_data_viz import visualize_model
 from nirs.viz.rasterizer import raster
 from nirs.training import train_and_eval
@@ -16,23 +18,14 @@ def train():
         4mb model:
             20 epochs -> 240s
     """
-    if TRAINING_POINTS == 1_000_000:
-        SIZE = "1M"
-    elif TRAINING_POINTS == 10_000_000:
-        SIZE = "10M"
-    TRAIN_PATH = os.path.join(TRAINING_DATA_PATH, f"eval_uniform_{SIZE}.parquet")
-    EVAL_PATH = os.path.join(TRAINING_DATA_PATH, f"eval_uniform_1M.parquet")
-    #PATH = os.path.join(TRAINING_DATA_PATH, f"log_dataset_{SIZE}.parquet")
-    #PATH = os.path.join(TRAINING_DATA_PATH, f"training_{SIZE}.parquet")
-    
+
     t0 = time.perf_counter()
     train_and_eval(
-        TRAIN_PATH,
+        train_dir=TRAIN_DIR,
         model_cfg=MODEL_CONFIG,
         eval_set_path=EVAL_PATH,
-        out_dir=BEST_CHECKPOINT_PATH,
-        log_dir=BEST_LOGS_PATH,
-        epochs=EPOCHS,
+        #out_dir=BEST_CHECKPOINT_PATH,
+        #log_dir=BEST_LOGS_PATH,
         batch_size = 16384,
         traning_size = TRAINING_POINTS,
         lr=LR,
@@ -69,8 +62,32 @@ def img():
     dt = time.perf_counter() - t0
     print(f"Total rasterization time Elapsed: {dt:.3f}s")
 
+def get_counts():
+    from nirs.weights import compute_class_counts
+    
+    def tensor_to_dict(tensor: torch.Tensor) -> dict:
+        """
+        Converts a tensor to a dictionary where keys are '1-based index' strings.
+        Example: tensor([0.5, 0.9]) -> {'1': 0.5, '2': 0.9}
+        """
+        return {str(i + 1): value.item() for i, value in enumerate(tensor)}
+    
+    c1_counts = compute_class_counts(
+        data_dir=TRAIN_DIR,
+        id_col="c1_id"
+    )
+    c2_counts = compute_class_counts(
+        data_dir=TRAIN_DIR,
+        id_col="c2_id"
+    )
+    print("C1 counts:", tensor_to_dict(c1_counts))
+    print("-------------------")
+    print("C2 counts:", tensor_to_dict(c2_counts))
+    
+    
+
 if __name__ == "__main__":
     #pass
-    train()
+    #train()
     #viz(True)
-    #img()
+    img()

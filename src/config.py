@@ -1,13 +1,14 @@
 import math
-from nirs.create_nirs import get_model_path, get_model_size
+import os
+from nirs.create_nirs import get_model_path
 from nirs.inference import InferenceConfig
-from utils.utils_geo import COUNTRIES_ECOC_PATH, CHECKPOINT_PATH, BEST_CHECKPOINT_PATH
+from utils.utils_geo import COUNTRIES_ECOC_PATH, CHECKPOINT_PATH, TRAINING_DATA_PATH
 
 MODEL = "siren"
 INIT_REGIME = "siren"
 ENCODING = None
 MODE = "softmax" 
-TOTAL_LAYERS = 5 # number of total layers = depth = n_hidden + 2
+TOTAL_LAYERS = 6 # number of total layers = depth = n_hidden + 2
 WIDTH = 512
 # layer_counts is the layout of the NIR trunk. 
 # len(layer_counts) is the number of activation function modules.
@@ -19,8 +20,8 @@ LAYER_COUNTS = (WIDTH,)*(TOTAL_LAYERS-1)
 #W0 = 51.959
 #WH = 2.59
 
-W0 = 30.0#106.5
-WH = 1.0#8.5
+W0 = 56.4#106.5
+WH = 7.1#8.5
 S = 7.07
 BETA = 8.0
 K = 20.0
@@ -44,13 +45,13 @@ MODEL_CONFIG = InferenceConfig(
     MODE, COUNTRIES_ECOC_PATH
 )
 
-TRAINING_POINTS = 10_000_000
-EPOCHS = 5
-LR = 9e-4#1.1e-4
-WD = 0#7e-6
+TRAINING_POINTS = 200_000_000
+LR = 7.2e-5
+WD = 2.9e-7#7e-6
 
 model_path = get_model_path(
         model_cfg=MODEL_CONFIG,
-        n_training=TRAINING_POINTS,
-        max_epochs=EPOCHS)    
-MODEL_PATH = f"{BEST_CHECKPOINT_PATH}/{model_path}" 
+        n_training=TRAINING_POINTS)    
+MODEL_PATH = f"{CHECKPOINT_PATH}/{model_path}" 
+TRAIN_DIR = os.path.join(TRAINING_DATA_PATH, "training")
+EVAL_PATH = os.path.join(TRAINING_DATA_PATH, f"eval_uniform_1M.parquet")

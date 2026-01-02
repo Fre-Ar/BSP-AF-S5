@@ -39,7 +39,7 @@ METRICS_CSV = "metrics.csv"
 
 # Dataset meta
 ECOC_BITS = 32
-NUM_COUNTRIES = 298
+NUM_COUNTRIES = 289
 COUNTRIES_LAYER = "countries"
 ID_FIELD    = "id"  
 

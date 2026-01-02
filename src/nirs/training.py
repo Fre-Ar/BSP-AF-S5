@@ -4,6 +4,7 @@ import math
 import pathlib
 import time
 import os
+import gc
 import optuna
 import numpy as np
 import pandas as pd
@@ -22,7 +23,7 @@ from .loss import UncertaintyWeighting
 from .nns.nn_incode import INCODE_NIR as Incode
 from .nns.nir import ClassHeadConfig
 from .create_nirs import build_model
-from .engine import compute_pos_weights
+from .weights import compute_pos_weights
 from .data import make_dataloaders
 from .metrics import compute_distance_metrics, compute_classification_metrics
 from .inference import InferenceConfig
@@ -308,6 +309,37 @@ class Trainer:
             for k, v in c2_met.items(): stats[f"c2_{k}"] = v
         
         return stats
+
+def load_parquet_as_tensors(file_path: str, device: str = "mps"):
+    """
+    Loads a single parquet file and converts it to PyTorch tensors.
+    """
+    df = pd.read_parquet(file_path)
+    
+    # 1. Inputs: (x, y, z) on unit sphere
+    # Ensure these columns exist in your dataframe
+    coords = df[['x', 'y', 'z']].values.astype(np.float32)
+    inputs = torch.from_numpy(coords)
+    
+    # 2. Targets: Distance + Class Labels
+    # Adjust these column names based on your exact schema
+    dists = df['dist_km'].values.astype(np.float32)
+    
+    # Check if we need class labels for classification heads
+    if 'c1_id' in df.columns:
+        c1 = df['c1_id'].values.astype(np.int64)
+        c2 = df['c2_id'].values.astype(np.int64)
+        # Stack targets as needed by your loss function
+        # Example: returning a tuple or a dict is often cleaner
+        targets = {
+            'dist': torch.from_numpy(dists).unsqueeze(1),
+            'c1': torch.from_numpy(c1),
+            'c2': torch.from_numpy(c2)
+        }
+    else:
+        targets = torch.from_numpy(dists).unsqueeze(1)
+        
+    return inputs, targets
     
 def aggregate_params(
     model_cfg: InferenceConfig,
@@ -396,15 +428,17 @@ def setup_logging(
 # ===================== PUBLIC API =====================
 
 def train_and_eval(
-    train_set_path: str,
+    train_dir: str,
     model_cfg: InferenceConfig,
-    eval_set_path: str | None = None,
+    eval_set_path: str,
+    file_prefix: str = "training_10M_",
+    num_chunks: int = 20,
     out_dir: str = CHECKPOINT_PATH,
     log_dir: str | os.PathLike = TRAINING_LOG_PATH,
     
-    epochs: int = 10,
+    #epochs: int = 10, # DEPRECATED concept in this mode, logic implies 1 pass
     batch_size: int = 8192,
-    traning_size = 1_000_000,
+    traning_size = 200_000_000,
     
     lr: float = 9e-4,
     weight_decay: float = 0.0,
@@ -416,7 +450,9 @@ def train_and_eval(
     trial = None # used for optuna trials
 ):
     """
-    Trains and evaluates a NIR architecture, saving the best out of all into a checkpoint.
+    Trains on a sequence of parquet files found in `train_dir`.
+    Iterates through files `training_10M_00.parquet` to `training_10M_19.parquet`.
+    Loads one file, trains 1 epoch, frees memory, and repeats.
     """
     if device is None:
         device = get_default_device()
@@ -424,70 +460,39 @@ def train_and_eval(
 
     t0 = time.perf_counter()
     # 1. Build Model
-    model, model_path = build_model(model_cfg, n_training=traning_size, max_epochs=epochs)
+    model, model_path = build_model(model_cfg, n_training=traning_size)
     model = model.to(device)
 
     # 2. Uncertainty Weighting
     uw = UncertaintyWeighting().to(device) if use_uncertainty_loss_weighting else None
 
-    # 3. Data Loaders
-    train_loader, _, class_cfg, codebook = make_dataloaders(
-        parquet_path=train_set_path,
-        label_mode=model_cfg.label_mode,
-        codes_path=model_cfg.codes_path,
-        split=(1.0, 0.0),
-        batch_size=batch_size,
-        codebook=None,
-        device=device
-    )
-    
-    _, val_loader, _, _ = make_dataloaders(
-        parquet_path=eval_set_path if eval_set_path else train_set_path,
-        label_mode=model_cfg.label_mode,
-        codes_path=model_cfg.codes_path,
-        split=(0.0, 1.0)  if eval_set_path else (0.9, 0.1),
-        batch_size=batch_size,
-        codebook=codebook,
-        device=device
-    )
-
-    # 4. Optimizer
+    # 3. Setup Optimizer
     params = [{"params": model.parameters()}]
     if uw is not None:
         params.append({"params": uw.parameters(), "weight_decay": weight_decay})
     
     opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
-    
-    # 5. ECOC pos Weights 
-    pw_c1, pw_c2 = compute_pos_weights(train_set_path, codebook, class_cfg)
-    
-    # 6. Trainer Instance
-    trainer = Trainer(
-        model=model,
-        model_name=model_cfg.model_name,
-        optimizer=opt,
-        device=device,
-        loss_weights=LossWeights(*loss_weights),
-        class_cfg=class_cfg,
-        pos_weight_c1=pw_c1,
-        pos_weight_c2=pw_c2,
-        codebook=codebook,
-        uw=uw,
-        regularize_hyperparams=model_cfg.regularize_hyperparams
-    )
 
-    # 7. Logging Setup
+    # 4. Load Evaluation Set
+    
+    _, val_loader, class_cfg, codebook = make_dataloaders(
+        parquet_path=eval_set_path,
+        label_mode=model_cfg.label_mode,
+        codes_path=model_cfg.codes_path,
+        split=(0.0, 1.0),
+        batch_size=batch_size,
+        codebook=None,
+        device=device
+    )
+    
+    # 5. Compute Weights
+    pw_c1, pw_c2 = compute_pos_weights(train_dir, codebook, class_cfg)
+        
+    # 6. Logging Setup
     num_params = sum(p.numel() for p in model.parameters())
     
-    #print(num_params)
-    #d = len(model_cfg.layer_counts)+1
-    #w = model_cfg.layer_counts[0]
-    #print(get_model_size(d, w))
-    #print(f"{trimf(num_params*1e-6)}M")
-
-    
     global_meta, save_path, csv_path = setup_logging(
-        out_dir,log_dir,model_path,train_set_path,num_params,model_cfg,lr,weight_decay)
+        out_dir,log_dir,model_path,train_dir,num_params,model_cfg,lr,weight_decay)
 
     history = []
     best_score = math.inf
@@ -495,17 +500,65 @@ def train_and_eval(
     dt = time.perf_counter() - t0
     print(f"Total Setup Time: {dt:.3f}s")
     start_time = time.perf_counter()
+    print(f"Start Chunked Training: {model_cfg.model_name} | {pretty_tuple(model_cfg.layer_counts)}")
+    
+    # 7. Chunked Training Loop
+    for i in range(num_chunks):
+        chunk_t0 = time.perf_counter()
+        
+        # A. Construct Path
+        filename = f"{file_prefix}{i:02d}.parquet"
+        chunk_path = os.path.join(train_dir, filename)
+        if not os.path.exists(chunk_path):
+            print(f"Warning: Chunk {chunk_path} not found. Stopping.")
+            break
+            
+        print(f"--> Loading Chunk [{i:02d}/{num_chunks-1}]: {filename}")
+        
+        # B. Load Chunk Data (Train Only)
+        # We reuse 'codebook' to ensure bit-mappings are identical to eval set
+        train_loader, _, _, _ = make_dataloaders(
+            parquet_path=chunk_path,
+            label_mode=model_cfg.label_mode,
+            codes_path=model_cfg.codes_path,
+            split=(1.0, 0.0), # 100% Train
+            batch_size=batch_size,
+            codebook=codebook, 
+            device=device
+        )
+        
+        # C. Instantiate Trainer
+        trainer = Trainer(
+            model=model,
+            model_name=model_cfg.model_name,
+            optimizer=opt,
+            device=device,
+            loss_weights=LossWeights(*loss_weights),
+            class_cfg=class_cfg,
+            pos_weight_c1=pw_c1,
+            pos_weight_c2=pw_c2,
+            codebook=codebook,
+            uw=uw,
+            regularize_hyperparams=model_cfg.regularize_hyperparams
+        )
 
-    
-    print(f"Start Training: {model_cfg.model_name} | {pretty_tuple(model_cfg.layer_counts)} | {model_cfg.label_mode}")
-    
-    # 8. Training Loop
-    for ep in range(1, epochs + 1):
-        t0 = time.perf_counter()
+        # D. Train (1 Epoch on this chunk)
         tr_stats = trainer.train_epoch(train_loader)
         val_stats = trainer.eval_epoch(val_loader)
-        epoch_time = time.perf_counter() - t0
         
+        # F. Cleanup Training Data IMMEDIATELY
+        del train_loader
+        del trainer # Remove references to loss functions holding chunk-specific tensors
+        
+        # Force Memory Release
+        gc.collect()
+        if device == "mps":
+            torch.mps.empty_cache()
+        elif device == "cuda":
+            torch.cuda.empty_cache()
+
+        chunk_time = time.perf_counter() - chunk_t0
+
         # --- Checkpoint Score ---
         rmse = val_stats.get("glob_RMSE")
         acc_c1 = val_stats.get("c1_glob_BalAcc", val_stats.get("c1_glob_DecAcc", 0.0))
@@ -515,8 +568,8 @@ def train_and_eval(
         
         # --- Record ---
         row = {
-            "epoch": ep, 
-            "time_ep": epoch_time, 
+            "chunk": i, 
+            "time_ep": chunk_time, 
             "val_score": val_score,
             **global_meta
         }
@@ -530,7 +583,7 @@ def train_and_eval(
         
         # --- Print ---
         # Concise print
-        print(f"[{ep:02d}] T:{tr_stats['loss']} | V_RMSE:{trimf(rmse)} | V_BalAcc:{trimf(acc_c1,2)}/{trimf(acc_c2,2)} | Score:{trimf(val_score)} | Time: {epoch_time:.3f}s")
+        print(f"[{i:02d}] T:{tr_stats['loss']} | V_RMSE:{trimf(rmse)} | V_BalAcc:{trimf(acc_c1,2)}/{trimf(acc_c2,2)} | Score:{trimf(val_score)} | Time: {chunk_time:.3f}s")
 
         # --- Save ---
         if val_score < best_score:
@@ -547,12 +600,12 @@ def train_and_eval(
                     "pos_weight_c2": pw_c2.cpu().tolist() if pw_c2 is not None else None,
                     "uw": uw.state_dict() if uw is not None else 1.0,
                 },
-                "epoch": ep
+                "chunk": i
             }, save_path)
         
         # Optuna Pruning
         if trial:
-            trial.report(val_score, ep)
+            trial.report(val_score, i)
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
     

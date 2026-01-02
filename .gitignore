@@ -22,6 +22,7 @@ best-logs/
 temp.py
 db.sqlite3
 metrics.csv
+analysis/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

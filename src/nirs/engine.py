@@ -65,7 +65,7 @@ def _compute_class_counts(
     
     return counts
 
-def compute_pos_weights(
+def _compute_pos_weights(
     parquet_path: str,
     codebook: dict,
     class_cfg: ClassHeadConfig):

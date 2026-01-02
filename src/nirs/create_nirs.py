@@ -199,8 +199,7 @@ def _build_fr(cfg: InferenceConfig, class_head_cfg: ClassHeadConfig):
 
 def get_model_path(
     model_cfg: InferenceConfig,
-    n_training=1_000_000,
-    max_epochs=20):
+    n_training=1_000_000):
     """
     Generates the standardized checkpoint path for a given model configuration.
     """
@@ -214,7 +213,6 @@ def get_model_path(
         f"{enc_str}_"
         f"{model_cfg.label_mode}_"
         f"{human_int(n_training)}_"
-        f"ep{max_epochs}_"
         f"{layer_str}"
     )
     suffix = ""
@@ -249,8 +247,7 @@ def get_model_path(
 
 def build_model(
     model_cfg: InferenceConfig,
-    n_training=1_000_000, 
-    max_epochs=20):
+    n_training=1_000_000):
     """
     Dynamically builds a NIR.
     
@@ -264,7 +261,7 @@ def build_model(
         (model, save_path_string)
     """
     # 1. Generate the path using the helper
-    save_path = get_model_path(model_cfg, n_training, max_epochs)
+    save_path = get_model_path(model_cfg, n_training)
     
 
     # 2. Configure Class Heads
@@ -293,4 +290,4 @@ def build_model(
 
 
 def get_model_size(depth: int, width: int):
-    return 4 * width + (depth-2)*(width * width + width) + (width+1) * 597 
+    return 4 * width + (depth-2)*(width * width + width) + (width+1) * (NUM_COUNTRIES*2 + 1)
