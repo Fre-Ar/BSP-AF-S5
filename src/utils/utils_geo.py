@@ -19,8 +19,10 @@ MERCATOR_LIMIT = 85.05112878  # Web Mercator latitude cap, degrees
 
 # --------------------------- CONFIG ---------------------------
 
+SRC = "src"
+GEODATA = os.path.join(SRC, "geodata")
 # Base folder for static geodata
-FOLDER_PATH = "src/geodata/data"        
+FOLDER_PATH = os.path.join(GEODATA, "data")
 
 # Input geodata
 GPKG_PATH           = os.path.join(FOLDER_PATH, "world_bank_geodata.gpkg")
@@ -29,12 +31,12 @@ ADJACENCY_JSON_PATH = os.path.join(FOLDER_PATH, "geodata_adjacency.json")
 COUNTRIES_ECOC_PATH = os.path.join(FOLDER_PATH, "countries.ecoc.json")
 
 # Training data + checkpoints
-TRAINING_DATA_PATH = "src/geodata/parquet"   
-CHECKPOINT_PATH = "src/checkpoints" 
-BEST_CHECKPOINT_PATH = "src/best-checkpoints" 
-TRAINING_LOG_PATH = "src/logs"
-BEST_LOGS_PATH = "src/best-logs"     
-DATA_ANALYSIS_PATH = "src/analysis" 
+TRAINING_DATA_PATH = os.path.join(GEODATA, "parquet")
+CHECKPOINT_PATH = os.path.join(SRC, "checkpoints") 
+BEST_CHECKPOINT_PATH = os.path.join(SRC, "best-checkpoints") 
+TRAINING_LOG_PATH = os.path.join(SRC, "logs")
+BEST_LOGS_PATH = os.path.join(SRC, "best-logs")     
+DATA_ANALYSIS_PATH = os.path.join(SRC, "analysis") 
 METRICS_CSV = "metrics.csv"  
 
 # Dataset meta
