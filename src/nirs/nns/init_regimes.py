@@ -11,13 +11,13 @@ import numpy as np
 @torch.no_grad
 def init_siren_linear(m: nn.Module, ith_layer: int, params: tuple) -> None:
     '''Weight/bias init per SIREN (Sitzmann et al., 2020).'''
-    w = params[0]
+    w0 = params[0]
     if not isinstance(m, nn.Linear):
         return
     if ith_layer == 0:
         bound = 1.0 / m.in_features
     else:
-        bound = np.sqrt(6.0 / m.in_features) / (w if w != 0 else 1.0)
+        bound = np.sqrt(6.0 / m.in_features) / (w0 if w0 != 0 else 1.0)
     m.weight.uniform_(-bound, bound)
     # biases are left at default
 
@@ -28,7 +28,6 @@ def init_siren_linear(m: nn.Module, ith_layer: int, params: tuple) -> None:
 def init_linear(m: nn.Module, ith_layer: int = 0, params: tuple = ()):
     if not isinstance(m, nn.Linear):
         return
-    nn.init.xavier_uniform_(m.weight)
     if m.bias is not None:
         nn.init.zeros_(m.bias)
 

@@ -7,7 +7,7 @@ from .nir import NIRLayer
 
 class Hosc(nn.Module):
     '''σ(x) = tanh(β*sin(x)), β>0.'''
-    def __init__(self, beta=8.0, adaptive = False): 
+    def __init__(self, beta=8.0, adaptive = True): 
         super().__init__()
         self.adaptive = adaptive
         if adaptive:

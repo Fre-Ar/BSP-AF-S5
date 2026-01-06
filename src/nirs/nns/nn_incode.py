@@ -85,7 +85,7 @@ class INCODETrunk(nn.Module):
         # SIREN init per layer
         self.w0s = [w0_first] + [w0_hidden] * (depth - 1)
         for i, lin in enumerate(self.net):
-            init_regime(lin, i, params=(self.w0s[i]))
+            init_regime(lin, i, params=(w0_first,))
 
     def forward(self, x: torch.Tensor, a, b, c, d) -> torch.Tensor:
         if x.dim() == 1:
@@ -167,7 +167,7 @@ class INCODE_NIR(nn.Module):
         def make_head(out_dim: int):
             layer = nn.Linear(layer_counts[-1], out_dim)
             if init_regime is not None:
-                init_regime(layer, -1, params=(w0_hidden))
+                init_regime(layer, -1, params=(w0_first,))
             return layer
 
         if class_cfg.class_mode == "ecoc":

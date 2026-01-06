@@ -28,16 +28,14 @@ class SplitNIR(nn.Module):
         class_cfg: ClassHeadConfig = ClassHeadConfig(class_mode="ecoc", n_bits=32)
     ):
         super().__init__()
-        # Checks
+        
         depth = len(layer_counts)
-        assert depth >= 2
+        assert depth >= 2, "depth must be ≥ 2"
         if not params:
             params = ((),)*depth
+        assert len(params) == depth
         
         self.class_cfg = class_cfg
-        dist_params = params[0]
-        c1_params = params[1]
-        c2_params = params[2]
         
         # Encoding
         dist_layers = []
@@ -65,23 +63,28 @@ class SplitNIR(nn.Module):
         else:  # pragma: no cover
             raise ValueError(f"Unknown class_mode={class_cfg.class_mode}")
         
-        
         # Fill NIRs' layers
-        def fill_layers(layers, out_dim, params_tuple):
+        def fill_layers(layers, out_dim):
             # trunk
-            layers += [layer(first_in, layer_counts[0], params=params_tuple[0], ith_layer=0)]
+            layers += [layer(first_in, layer_counts[0], params=params[0], ith_layer=0)]
             for i in range(1, depth):
-                layers += [layer(layer_counts[i-1], layer_counts[i], params=params_tuple[i], ith_layer=i, is_last=(i==depth-1))]
+                layers += [layer(layer_counts[i-1], layer_counts[i], params=params[i], ith_layer=i, is_last=(i==depth-1))]
+            
+            if init_regime is not None:
+                for i in range(depth):
+                    init_regime(layers[i].linear, i, params[0])
+
             # head
-            layers +=  [nn.Linear(layer_counts[-1], out_dim)]    
+            layers +=  [nn.Linear(layer_counts[-1], out_dim)]  
+            init_regime(layers[-1], -1, params[0])
+            
             return layers
-        
-        self.softplus = nn.Softplus()
         
         dist_layers = fill_layers(dist_layers, 1)
         c1_layers = fill_layers(c1_layers, out_c1)
         c2_layers = fill_layers(c2_layers, out_c2)
         
+        self.softplus = nn.Softplus()
         self.dist_net = nn.Sequential(*dist_layers)
         self.c1_net = nn.Sequential(*c1_layers)
         self.c2_net = nn.Sequential(*c2_layers)

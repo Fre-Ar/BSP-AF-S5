@@ -7,7 +7,7 @@ import torch
 from nirs.viz.compare_data_viz import visualize_model
 from nirs.viz.rasterizer import raster
 from nirs.training import train_and_eval
-from utils.utils_geo import TRAINING_DATA_PATH, BEST_LOGS_PATH
+from utils.utils_geo import TRAINING_DATA_PATH, BEST_LOGS_PATH, BEST_CHECKPOINT_PATH
 from config import *
 
 def train():
@@ -24,8 +24,8 @@ def train():
         train_dir=TRAIN_DIR,
         model_cfg=MODEL_CONFIG,
         eval_set_path=EVAL_PATH,
-        #out_dir=BEST_CHECKPOINT_PATH,
-        #log_dir=BEST_LOGS_PATH,
+        out_dir=BEST_CHECKPOINT_PATH,
+        log_dir=BEST_LOGS_PATH,
         batch_size = 16384,
         traning_size = TRAINING_POINTS,
         lr=LR,
@@ -57,7 +57,7 @@ def img():
         model_cfg=MODEL_CONFIG,
         checkpoint_path=MODEL_PATH,
         render = "c1",
-        area="uk")
+        area="alpes")
     
     dt = time.perf_counter() - t0
     print(f"Total rasterization time Elapsed: {dt:.3f}s")
@@ -88,6 +88,6 @@ def get_counts():
 
 if __name__ == "__main__":
     #pass
-    #train()
+    train()
     #viz(True)
-    img()
+    #img()

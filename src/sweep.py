@@ -16,7 +16,7 @@ def objective(trial):
     valid_depths = []
     possible_depths = range(3, 16) # 3 to 15
     for d in possible_depths:
-        params = get_model_size(d, width)
+        params = get_model_size(d, width, flag="split")
         if params <= 2_000_000: # 8MB limit (float32)
             valid_depths.append(d)
         else:
@@ -40,24 +40,22 @@ def objective(trial):
     
     # w_hidden: Frequency multiplier for HIDDEN layers (Standard: 1.0)
     # Raising this increases the "high frequency" capacity of deep layers.
-    w_hidden = trial.suggest_float("w_hidden", 0.8, 8.0)
+    #w_hidden = trial.suggest_float("w_hidden", 0.8, 8.0)
+    
+    #s = trial.suggest_float("s", 3.5, 70.7) # Gaussian width parameter
     
     # Optimization
     lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True) 
-    
-    # Weight Decay
-    # Very sensitive parameter. We sweep log-scale from near-zero to strong.
-    weight_decay = trial.suggest_float("weight_decay", 1e-8, 1e-4, log=True)
-    
+
     # 3. Construct Config
     model_cfg = InferenceConfig(
-        model_name="siren",
+        model_name="split_siren",
         init_regime="siren",
         encoding=None,
         layer_counts=layer_counts,
         
         w0=w0, 
-        w_hidden=w_hidden,
+        w_hidden=w0,
         s=S, 
         beta=BETA, 
         k=K,
@@ -84,7 +82,7 @@ def objective(trial):
         batch_size = 16384,
         traning_size = TRAINING_POINTS,
         lr=lr,
-        weight_decay=weight_decay,
+        weight_decay=WD,
         device="mps",
         trial=trial   # Pass trial for pruning
         )
@@ -102,11 +100,11 @@ if __name__ == "__main__":
     # 5. Setup Study
     storage_url = "sqlite:///db.sqlite3" # Saves progress to file
     study = optuna.create_study(
-        study_name="siren_sweep_200M_16k",
+        study_name="split_siren_sweep",
         direction="minimize",
         storage=storage_url,
         load_if_exists=True,
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=7)
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5)
     )
     
     print(f"Running sweep... View results with: optuna-dashboard {storage_url}")

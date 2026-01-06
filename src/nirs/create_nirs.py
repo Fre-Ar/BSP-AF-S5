@@ -151,11 +151,13 @@ def _build_incode(cfg: InferenceConfig, class_head_cfg: ClassHeadConfig):
 
 def _build_split_nir(cfg: InferenceConfig, class_head_cfg: ClassHeadConfig):
     """Builds the Split architecture (SIREN based)."""
+    init_regime = INIT_REGISTRY.get(cfg.init_regime.lower()) if cfg.init_regime else None
     return SplitNIR(
-        layer_cls=SIRENLayer,
+        layer=SIRENLayer,
+        init_regime=init_regime,
         in_dim=3,
         layer_counts=cfg.layer_counts,
-        params=_get_layer_params(cfg, "split_siren"),
+        params=_get_layer_params(cfg),
         class_cfg=class_head_cfg
     )
     
@@ -289,5 +291,8 @@ def build_model(
     return model, save_path
 
 
-def get_model_size(depth: int, width: int):
-    return 4 * width + (depth-2)*(width * width + width) + (width+1) * (NUM_COUNTRIES*2 + 1)
+def get_model_size(depth: int, width: int, flag: str = "") -> int:
+    if flag == "split":
+        return 12 * width + 3*(depth-2)*(width * width + width) + (width+1) * (NUM_COUNTRIES*2 + 1)
+    else:
+        return 4 * width + (depth-2)*(width * width + width) + (width+1) * (NUM_COUNTRIES*2 + 1)
