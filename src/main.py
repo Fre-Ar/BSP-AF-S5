@@ -21,9 +21,10 @@ def train():
 
     t0 = time.perf_counter()
     train_and_eval(
-        train_dir=TRAIN_DIR,
+        train_dir=TRAIN_BIAS_DIR,
         model_cfg=MODEL_CONFIG,
         eval_set_path=EVAL_PATH,
+        file_prefix="10M_",
         out_dir=BEST_CHECKPOINT_PATH,
         log_dir=BEST_LOGS_PATH,
         batch_size = 16384,
@@ -56,7 +57,7 @@ def img():
         model_cfg=MODEL_CONFIG,
         checkpoint_path=MODEL_PATH,
         render = "c1",
-        area="uk")
+        area="alpes")
     
     dt = time.perf_counter() - t0
     print(f"Total rasterization time Elapsed: {dt:.3f}s")
@@ -86,7 +87,7 @@ def get_counts():
     
 
 if __name__ == "__main__":
-    pass
-    #train()
+    #pass
+    train()
     #viz(True)
     #img()
