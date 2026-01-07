@@ -8,7 +8,7 @@ MODEL = "split_siren"
 INIT_REGIME = "siren"
 ENCODING = None
 MODE = "softmax" 
-TOTAL_LAYERS = 5 # number of total layers = depth = n_hidden + 2
+TOTAL_LAYERS = 6 # number of total layers = depth = n_hidden + 2
 WIDTH = 256
 # layer_counts is the layout of the NIR trunk. 
 # len(layer_counts) is the number of activation function modules.
@@ -20,8 +20,8 @@ LAYER_COUNTS = (WIDTH,)*(TOTAL_LAYERS-1)
 #W0 = 51.959
 #WH = 2.59
 
-W0 = 30.0#56.4
-WH = 30.0#7.1
+W0 = 22.812#56.4
+WH = W0#7.1
 S = 7.07
 BETA = 8.0
 K = 20.0
@@ -46,7 +46,7 @@ MODEL_CONFIG = InferenceConfig(
 )
 
 TRAINING_POINTS = 200_000_000
-LR = 1e-4#7.2e-5
+LR = 5.22e-5#7.2e-5
 WD = 0
 
 model_path = get_model_path(

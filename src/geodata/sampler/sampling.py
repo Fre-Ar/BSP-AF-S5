@@ -40,21 +40,15 @@ def _sample_distance_km(batch_size: int, rng: np.random.Generator) -> tuple[np.n
 
     Note: r255 ("uniform globe") is handled elsewhere and not sampled here.
     '''
-    # Bands low/high (km). Use a small >0 lower bound for r0 to avoid log(0).
-    lows  = np.array([0.01,  1.0,   5.0,   10.0,  25.0, 50.0], dtype=np.float32)
-    highs = np.array([1.0,   5.0,  10.0,   25.0,  50.0, 150.0], dtype=np.float32)
-    # Probabilities normalized from {22,18,15,8,4,2,1}
-    p_raw = np.array([36, 36, 11, 9, 4, 4], dtype=np.float64)
-    probs = (p_raw / p_raw.sum()).astype(np.float64)
-
-    bands = rng.choice(np.arange(6, dtype=np.uint8), size=batch_size, p=probs)
-    low  = lows[bands]
-    high = highs[bands]
-
-    # Log-uniform sampling within each band
+    bands = rng.choice([0], size=batch_size, p=[1.0])
+    low  = np.array([0.1], dtype=np.float32)[bands]
+    high = np.array([25.0], dtype=np.float32)[bands]
+    
+    # Log-uniform sampling in each band
     u = rng.random(batch_size, dtype=np.float32)
     d = np.exp(np.log(low) + u * (np.log(high) - np.log(low))).astype(np.float32)
-    return d, bands
+    
+    return d, bands.astype(np.uint8)
 
 
 def _sample_distance_km_old(batch_size: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:

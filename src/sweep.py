@@ -6,15 +6,16 @@ from nirs.training import train_and_eval
 from utils.utils_geo import COUNTRIES_ECOC_PATH, TRAINING_DATA_PATH
 from config import *
 from nirs.create_nirs import get_model_size
+from utils.utils import get_default_device
 
 def objective(trial):
      
     # 1. Architecture Sweep
-    width = trial.suggest_categorical("width", [128, 256, 512])
+    width = trial.suggest_categorical("width", [256, 512])
     
     # Dynamically calculate the Max Depth allowed for this Width
     valid_depths = []
-    possible_depths = range(3, 16) # 3 to 15
+    possible_depths = range(3, 9) # 3 to 15
     for d in possible_depths:
         params = get_model_size(d, width, flag="split")
         if params <= 2_000_000: # 8MB limit (float32)
@@ -83,7 +84,7 @@ def objective(trial):
         traning_size = TRAINING_POINTS,
         lr=lr,
         weight_decay=WD,
-        device="mps",
+        device=get_default_device(),
         trial=trial   # Pass trial for pruning
         )
         
@@ -100,7 +101,7 @@ if __name__ == "__main__":
     # 5. Setup Study
     storage_url = "sqlite:///db.sqlite3" # Saves progress to file
     study = optuna.create_study(
-        study_name="split_siren_sweep",
+        study_name="split_siren_biased",
         direction="minimize",
         storage=storage_url,
         load_if_exists=True,

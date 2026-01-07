@@ -30,7 +30,6 @@ def train():
         traning_size = TRAINING_POINTS,
         lr=LR,
         weight_decay=WD,
-        #lr=3e-4,
         )
     dt = time.perf_counter() - t0
     print(f"Total training time Elapsed: {dt:.3f}s")
@@ -57,7 +56,7 @@ def img():
         model_cfg=MODEL_CONFIG,
         checkpoint_path=MODEL_PATH,
         render = "c1",
-        area="alpes")
+        area="uk")
     
     dt = time.perf_counter() - t0
     print(f"Total rasterization time Elapsed: {dt:.3f}s")
@@ -87,7 +86,7 @@ def get_counts():
     
 
 if __name__ == "__main__":
-    #pass
-    train()
+    pass
+    #train()
     #viz(True)
     #img()

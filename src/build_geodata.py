@@ -62,20 +62,20 @@ def create_training_data():
     mp.set_start_method("spawn", force=True)
 
     t0 = time.perf_counter()
-    n = 2_000_000
-    num_files = 100
+    n = 10_000_000
+    num_files = 20
 
     def path_gen(i: int) -> str:
         return os.path.join(
             TRAINING_DATA_PATH, 
-            "training", 
+            "training_biased", 
             f"{human_int(n)}_{i:02d}.parquet"
         )
     paths = make_batch_datasets(
         n_total_per_file=n,
         num_files=num_files,
         path_generator=path_gen,
-        mixture=(0.0, 1.0),
+        mixture=(0.5, 0.5),
         shards_per_file=32, 
         max_workers=None,
         seed=None,
@@ -142,5 +142,5 @@ def bundle_training_data(
 
 
 if __name__ == "__main__":
-    pass
-    #create_training_data()
+    #pass
+    create_training_data()
