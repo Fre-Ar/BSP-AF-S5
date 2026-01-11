@@ -27,7 +27,7 @@ def train():
         file_prefix="10M_",
         out_dir=BEST_CHECKPOINT_PATH,
         log_dir=BEST_LOGS_PATH,
-        batch_size = 16384,
+        batch_size = 4096,#16384,
         traning_size = TRAINING_POINTS,
         lr=LR,
         weight_decay=WD,
@@ -57,7 +57,7 @@ def img():
         model_cfg=MODEL_CONFIG,
         checkpoint_path=MODEL_PATH,
         render = "c1",
-        area="alpes")
+        area="nz")
     
     dt = time.perf_counter() - t0
     print(f"Total rasterization time Elapsed: {dt:.3f}s")

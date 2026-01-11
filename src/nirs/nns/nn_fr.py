@@ -222,7 +222,7 @@ class FR_NIR(nn.Module):
         def make_lin(in_dim: int, out_dim: int, ith: int =-1):
             layer = nn.Linear(in_dim, out_dim)
             if init_regime is not None:
-                init_regime(layer, ith, params=(param1))
+                init_regime(layer, ith, params=(param1,))
             return layer
         
         input = make_lin(in_dim, hidden_dim, ith=0)

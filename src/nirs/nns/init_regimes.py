@@ -30,6 +30,13 @@ def init_linear(m: nn.Module, ith_layer: int = 0, params: tuple = ()):
         return
     if m.bias is not None:
         nn.init.zeros_(m.bias)
+        
+# ---------------------------
+# No special initialization
+# ---------------------------
+@torch.no_grad
+def init_none(m: nn.Module, ith_layer: int = 0, params: tuple = ()):
+    return
 
 # ---------------------------
 # Reset params initialization
@@ -38,7 +45,7 @@ def init_linear(m: nn.Module, ith_layer: int = 0, params: tuple = ()):
 def init_reset(m: nn.Module, ith_layer: int = 0, params: tuple = ()):
     if not isinstance(m, nn.Linear):
         return
-    nn.init.kaiming_uniform_(m.weight, a=0.0, nonlinearity="relu")
+    nn.init.kaiming_uniform_(m.weight, a=math.sqrt(5))
     if m.bias is not None:
         # PyTorch Linear default with kaiming_uniform_: U(-1/sqrt(in_dim), +1/sqrt(in_dim))
         bound = 1.0 / np.sqrt(m.in_features) if m.in_features > 0 else 0.0

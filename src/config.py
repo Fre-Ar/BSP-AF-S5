@@ -4,7 +4,7 @@ from nirs.create_nirs import get_model_path
 from nirs.inference import InferenceConfig
 from utils.utils_geo import COUNTRIES_ECOC_PATH, CHECKPOINT_PATH, TRAINING_DATA_PATH, BEST_CHECKPOINT_PATH
 
-MODEL = "split_siren"
+MODEL = "hosc"
 INIT_REGIME = "siren"
 ENCODING = None
 MODE = "softmax" 
@@ -21,7 +21,7 @@ LAYER_COUNTS = (WIDTH,)*(TOTAL_LAYERS-1)
 #WH = 2.59
 
 W0 = 30.0#56.4
-WH = W0#7.1
+WH = 1.0#7.1
 S = 7.07
 BETA = 8.0
 K = 20.0
@@ -31,7 +31,7 @@ FR_F = 256
 FR_P = 8
 FR_ALPHA = 0.01
 
-ENCOD_ALPHA = 2.0 * math.pi
+ENCOD_ALPHA = math.pi
 ENCOD_SIGMA = 5.0
 ENCOD_M = 256
 
@@ -46,7 +46,7 @@ MODEL_CONFIG = InferenceConfig(
 )
 
 TRAINING_POINTS = 200_000_000
-LR = 1e-4#5.22e-5
+LR = 3e-4 #5.22e-5
 WD = 0
 
 model_path = get_model_path(

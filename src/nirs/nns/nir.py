@@ -57,8 +57,9 @@ class NIRTrunk(nn.Module):
         
         if init_regime is not None:
             for i in range(depth):
-                init_regime(layers[i].linear, i, params[0])
-            
+                if isinstance(layers[i], NIRLayer):
+                    init_regime(layers[i].linear, i, params=params[0])
+
         self.net = nn.Sequential(*layers)
         
 

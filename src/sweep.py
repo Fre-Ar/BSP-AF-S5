@@ -15,9 +15,9 @@ def objective(trial):
     
     # Dynamically calculate the Max Depth allowed for this Width
     valid_depths = []
-    possible_depths = range(3, 9) # 3 to 15
+    possible_depths = range(3, 20) # 3 to 19
     for d in possible_depths:
-        params = get_model_size(d, width, flag="split")
+        params = get_model_size(d, width, flag="")
         if params <= 2_000_000: # 8MB limit (float32)
             valid_depths.append(d)
         else:
@@ -37,7 +37,8 @@ def objective(trial):
     
     # 2. SIREN Hyperparams Sweep
     # w0: Frequency multiplier for FIRST layer (Standard: ~30.0)
-    w0 = trial.suggest_float("w0", 20.0, 120.0)
+    #w0 = trial.suggest_float("w0", 20.0, 60.0)
+    w0 = 30.0
     
     # w_hidden: Frequency multiplier for HIDDEN layers (Standard: 1.0)
     # Raising this increases the "high frequency" capacity of deep layers.
@@ -50,13 +51,13 @@ def objective(trial):
 
     # 3. Construct Config
     model_cfg = InferenceConfig(
-        model_name="split_siren",
+        model_name="hosc",
         init_regime="siren",
         encoding=None,
         layer_counts=layer_counts,
         
-        w0=w0, 
-        w_hidden=w0,
+        w0=W0, 
+        w_hidden=WH,
         s=S, 
         beta=BETA, 
         k=K,
@@ -75,12 +76,12 @@ def objective(trial):
     # 4. Run Training
     try:
         score = train_and_eval(
-        train_dir=TRAIN_DIR,
+        train_dir=TRAIN_BIAS_DIR,
         model_cfg=model_cfg,
         eval_set_path=EVAL_PATH,
         #out_dir=BEST_CHECKPOINT_PATH,
         #log_dir=BEST_LOGS_PATH,
-        batch_size = 16384,
+        batch_size = 4096,
         traning_size = TRAINING_POINTS,
         lr=lr,
         weight_decay=WD,
@@ -101,7 +102,7 @@ if __name__ == "__main__":
     # 5. Setup Study
     storage_url = "sqlite:///db.sqlite3" # Saves progress to file
     study = optuna.create_study(
-        study_name="split_siren_biased",
+        study_name="hosc_sweep",
         direction="minimize",
         storage=storage_url,
         load_if_exists=True,

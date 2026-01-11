@@ -21,6 +21,7 @@ from .nns.init_regimes import (
     init_siren_linear,
     init_linear,
     init_reset,
+    init_none,
     init_finer_linear,
     init_mfn_linear,
     init_mfn_filter)
@@ -61,6 +62,7 @@ INIT_REGISTRY: Dict[str, Callable] = {
     "siren": init_siren_linear,
     "default": init_linear,
     "reset": init_reset,
+    "none": init_none,
     "finer": init_finer_linear,
     "mfn": init_mfn_linear,
 }
@@ -86,9 +88,9 @@ def _get_layer_params(cfg: InferenceConfig) -> Optional[Tuple[Tuple[float, ...],
             return ((cfg.s,),) * n_layers
             
         case "hosc":
-            # HOSC: (beta) for all layers
-            return ((cfg.beta,),) * n_layers
-            
+            # HOSC:  (w0_first, beta) for layer 0, (w_hidden, beta) for rest
+            return ((cfg.w0, cfg.beta),) + ((cfg.w_hidden, cfg.beta),) * (n_layers - 1)
+
         case "sinc":
             # SINC: (w0) for all layers 
             return ((cfg.w0,),) * n_layers
@@ -183,8 +185,7 @@ def _build_fr(cfg: InferenceConfig, class_head_cfg: ClassHeadConfig):
     act = ACT_REGISTRY.get(act_name)
     init_regime = INIT_REGISTRY.get(cfg.init_regime.lower()) if cfg.init_regime else None
 
-    if act == "siren":
-        act_params = (cfg.w0,cfg.w_hidden) if (act == "siren") else ()
+    act_params = (cfg.w0,cfg.w_hidden) if (act_name == "siren") else ()
     
     return FR_NIR(
         activation=act,
@@ -234,6 +235,13 @@ def get_model_path(
             suffix = f"_w0={trimf(model_cfg.w0)}"
         case "relu":
             suffix = ""
+        case "fr_siren" | "fr_relu":
+            suffix = (
+                f"_w0={trimf(model_cfg.w0)}_"
+                f"freq={human_int(model_cfg.FR_f)}_"
+                f"phases={human_int(model_cfg.FR_p)}_"
+                f"fr-alpha={trimf(model_cfg.FR_alpha)}"
+            )
         case _:
             raise ValueError(f"Unknown model name for path generation: {model_cfg.model_name}")
     

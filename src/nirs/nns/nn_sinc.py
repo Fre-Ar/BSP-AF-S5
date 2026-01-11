@@ -12,9 +12,11 @@ class Sinc(nn.Module):
         self.w = w
         
     def forward(self, x): 
+        # torch.sinc(z) = sin(pi * z) / (pi * z)
+        # We want sin(y) / y where y = w*x
+        # So input to torch.sinc should be (w*x) / pi
         y = self.w * x
-        # sin(y)/y -> 1 as y -> 0, so:
-        return torch.where(y.abs() < 1e-7, torch.ones_like(y), torch.sin(y) / y)
+        return torch.sinc(y / torch.pi)
 
 class SINCLayer(NIRLayer):
     '''
