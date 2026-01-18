@@ -7,13 +7,13 @@ from .nir import NIRLayer
 
 class Finer(nn.Module):
     '''σ(x) = sin( ω(|x|+1)x )'''
-    def __init__(self, w=torch.pi): 
+    def __init__(self, w=1.0): 
         super().__init__()
         self.w = w
         
     def forward(self, x): 
         y = self.w * x
-        return torch.where(y.abs() < 1e-7, torch.ones_like(y), torch.sin(y) / y)
+        return torch.sin(self.w * (torch.abs(x) + 1.0) * x)
 
 class FINERLayer(NIRLayer):
     '''

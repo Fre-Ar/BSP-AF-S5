@@ -101,7 +101,7 @@ class PositionalEncoding(EncodingBase):
         alpha: float = 2.0 * math.pi,
         sigma: float = 5.0,
         m: int = 256,
-        include_input: bool = True,
+        include_input: bool = False,
     ):
         super().__init__(in_dim)
         self.m = m

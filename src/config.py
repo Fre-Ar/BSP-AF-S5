@@ -7,7 +7,7 @@ from nirs.create_nirs import get_model_size
 
 MODEL = "relu"
 INIT_REGIME = "none"
-ENCODING = None
+ENCODING = "pos"
 MODE = "softmax" 
 TOTAL_LAYERS = 8 # number of total layers = depth = n_hidden + 2
 WIDTH = 512
@@ -26,7 +26,7 @@ FR_F = 256
 FR_P = 8
 FR_ALPHA = 0.01
 
-ENCOD_ALPHA = math.pi
+ENCOD_ALPHA = 2*math.pi
 ENCOD_SIGMA = 5.0
 ENCOD_M = 256
 
