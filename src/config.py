@@ -3,29 +3,24 @@ import os
 from nirs.create_nirs import get_model_path
 from nirs.inference import InferenceConfig
 from utils.utils_geo import COUNTRIES_ECOC_PATH, CHECKPOINT_PATH, TRAINING_DATA_PATH, BEST_CHECKPOINT_PATH
+from nirs.create_nirs import get_model_size
 
 MODEL = "hosc"
 INIT_REGIME = "siren"
 ENCODING = None
 MODE = "softmax" 
-TOTAL_LAYERS = 5 # number of total layers = depth = n_hidden + 2
-WIDTH = 256
+TOTAL_LAYERS = 8 # number of total layers = depth = n_hidden + 2
+WIDTH = 512
 # layer_counts is the layout of the NIR trunk. 
 # len(layer_counts) is the number of activation function modules.
 LAYER_COUNTS = (WIDTH,)*(TOTAL_LAYERS-1)
 
-#W0 = 76.632 
-#WH = 4.079
-
-#W0 = 51.959
-#WH = 2.59
-
-W0 = 30.0#56.4
-WH = 1.0#7.1
+W0 = 30.0
+WH = 1.0
 S = 7.07
 BETA = 8.0
 K = 20.0
-GLOBAL_Z = False # False enables RFF latent Z code
+GLOBAL_Z = True # False enables RFF latent Z code
 REG_HYPER = True
 FR_F = 256
 FR_P = 8
@@ -46,7 +41,7 @@ MODEL_CONFIG = InferenceConfig(
 )
 
 TRAINING_POINTS = 200_000_000
-LR = 3e-4 #5.22e-5
+LR = 1e-4 
 WD = 0
 
 model_path = get_model_path(
@@ -56,3 +51,8 @@ MODEL_PATH = f"{BEST_CHECKPOINT_PATH}/{model_path}"
 TRAIN_DIR = os.path.join(TRAINING_DATA_PATH, "training")
 TRAIN_BIAS_DIR = os.path.join(TRAINING_DATA_PATH, "training_biased")
 EVAL_PATH = os.path.join(TRAINING_DATA_PATH, f"eval_uniform_1M.parquet")
+
+
+
+#params = get_model_size(3, 1024)
+#print(f"Model params: {params/1e6:.3f}M")

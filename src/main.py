@@ -1,14 +1,37 @@
 # src/main.py
-import os
 import time
-
+import random
+import os
+import numpy as np
 import torch
 
 from nirs.viz.compare_data_viz import visualize_model
 from nirs.viz.rasterizer import raster
 from nirs.training import train_and_eval
-from utils.utils_geo import TRAINING_DATA_PATH, BEST_LOGS_PATH, BEST_CHECKPOINT_PATH
+from utils.utils_geo import SEED, TRAINING_DATA_PATH, BEST_LOGS_PATH, BEST_CHECKPOINT_PATH
 from config import *
+
+def seed_everything(seed: int = SEED):
+    """
+    Seeds all random number generators to ensure reproducibility.
+    """
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    
+    # Torch (CPU + CUDA)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed) # if using multi-GPU
+    
+    # Torch (MPS - Apple Silicon)
+    if torch.backends.mps.is_available():
+        torch.mps.manual_seed(seed)
+
+    # Force deterministic algorithms (Optional: may slow down training)
+    # torch.use_deterministic_algorithms(True) 
+    
+    print(f"[Info] Global seed set to: {seed}")
 
 def train():
     """
@@ -57,7 +80,7 @@ def img():
         model_cfg=MODEL_CONFIG,
         checkpoint_path=MODEL_PATH,
         render = "c1",
-        area="nz")
+        area="alpes")
     
     dt = time.perf_counter() - t0
     print(f"Total rasterization time Elapsed: {dt:.3f}s")
@@ -88,6 +111,7 @@ def get_counts():
 
 if __name__ == "__main__":
     #pass
+    seed_everything(SEED)
     train()
     #viz(True)
     #img()
