@@ -112,6 +112,7 @@ def get_counts():
 if __name__ == "__main__":
     #pass
     seed_everything(SEED)
-    train(lr=4e-5)
+    for lr in [4e-4, 1e-4, 4e-5, 1e-5]:
+        train(lr=lr)
     #viz(True)
     #img()
