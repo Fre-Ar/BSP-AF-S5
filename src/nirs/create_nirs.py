@@ -27,7 +27,7 @@ from .nns.init_regimes import (
     init_mfn_filter)
  
 from utils.utils_geo import ECOC_BITS, NUM_COUNTRIES
-from utils.utils import human_int, pretty_tuple, trimf
+from utils.utils import human_int, pretty_tuple, to_scientific, trimf
 
 # -----------------------------------------------------------------------------
 # REGISTRIES
@@ -202,7 +202,8 @@ def _build_fr(cfg: InferenceConfig, class_head_cfg: ClassHeadConfig):
 
 def get_model_path(
     model_cfg: InferenceConfig,
-    n_training=1_000_000):
+    n_training=1_000_000,
+    lr = 1e-4):
     """
     Generates the standardized checkpoint path for a given model configuration.
     """
@@ -212,6 +213,7 @@ def get_model_path(
     
     base_name = (
         f"{model_cfg.model_name}_"
+        f"lr={to_scientific(lr)}_"
         f"init-{model_cfg.init_regime}"
         f"{enc_str}_"
         f"{model_cfg.label_mode}_"
@@ -257,7 +259,8 @@ def get_model_path(
 
 def build_model(
     model_cfg: InferenceConfig,
-    n_training=1_000_000):
+    n_training=1_000_000,
+    lr = 1e-4):
     """
     Dynamically builds a NIR.
     
@@ -271,7 +274,7 @@ def build_model(
         (model, save_path_string)
     """
     # 1. Generate the path using the helper
-    save_path = get_model_path(model_cfg, n_training)
+    save_path = get_model_path(model_cfg, n_training, lr)
     
 
     # 2. Configure Class Heads

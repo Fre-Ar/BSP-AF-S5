@@ -124,6 +124,16 @@ def write_json(out: str, dictionary: dict, name = ""):
 def trimf(f: float, dec: int = 3):
     return f"{f:.{dec}f}".rstrip('0').rstrip('.')
 
+def to_scientific(n):
+    # Format to scientific notation with 0 decimal places (e.g., 1e-04)
+    s = "{:.0e}".format(n)
+    
+    # Split base and exponent to remove the leading zero in the exponent
+    base, exponent = s.split('e')
+    
+    # Reassemble: '1', '-04' -> '1e-4'
+    return f"{base}e{int(exponent)}"
+
 def human_int(n: int) -> str:
     """
     Converts an integer into a compact human-readable string.

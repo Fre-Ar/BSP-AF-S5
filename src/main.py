@@ -33,7 +33,7 @@ def seed_everything(seed: int = SEED):
     
     print(f"[Info] Global seed set to: {seed}")
 
-def train():
+def train(lr = LR):
     """
     On MPS:
         1mb model:
@@ -52,7 +52,7 @@ def train():
         log_dir=BEST_LOGS_PATH,
         batch_size = 4096,#16384,
         traning_size = TRAINING_POINTS,
-        lr=LR,
+        lr=lr,
         weight_decay=WD,
         )
     dt = time.perf_counter() - t0
@@ -112,6 +112,6 @@ def get_counts():
 if __name__ == "__main__":
     #pass
     seed_everything(SEED)
-    train()
+    train(lr=4e-5)
     #viz(True)
     #img()

@@ -5,7 +5,7 @@ from nirs.inference import InferenceConfig
 from utils.utils_geo import COUNTRIES_ECOC_PATH, CHECKPOINT_PATH, TRAINING_DATA_PATH, BEST_CHECKPOINT_PATH
 from nirs.create_nirs import get_model_size
 
-MODEL = "hosc"
+MODEL = "incode"
 INIT_REGIME = "siren"
 ENCODING = None
 MODE = "softmax" 
@@ -16,7 +16,7 @@ WIDTH = 512
 LAYER_COUNTS = (WIDTH,)*(TOTAL_LAYERS-1)
 
 W0 = 30.0
-WH = 1.0
+WH = 30.0
 S = 7.07
 BETA = 8.0
 K = 20.0
@@ -41,12 +41,13 @@ MODEL_CONFIG = InferenceConfig(
 )
 
 TRAINING_POINTS = 200_000_000
-LR = 1e-4 
+LR = 1e-5
 WD = 0
 
 model_path = get_model_path(
         model_cfg=MODEL_CONFIG,
-        n_training=TRAINING_POINTS)    
+        n_training=TRAINING_POINTS,
+        lr=LR)    
 MODEL_PATH = f"{BEST_CHECKPOINT_PATH}/{model_path}" 
 TRAIN_DIR = os.path.join(TRAINING_DATA_PATH, "training")
 TRAIN_BIAS_DIR = os.path.join(TRAINING_DATA_PATH, "training_biased")

@@ -460,7 +460,7 @@ def train_and_eval(
 
     t0 = time.perf_counter()
     # 1. Build Model
-    model, model_path = build_model(model_cfg, n_training=traning_size)
+    model, model_path = build_model(model_cfg, n_training=traning_size, lr=lr)
     model = model.to(device)
 
     # 2. Uncertainty Weighting
