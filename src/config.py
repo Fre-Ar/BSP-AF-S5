@@ -5,8 +5,8 @@ from nirs.inference import InferenceConfig
 from utils.utils_geo import COUNTRIES_ECOC_PATH, CHECKPOINT_PATH, TRAINING_DATA_PATH, BEST_CHECKPOINT_PATH
 from nirs.create_nirs import get_model_size
 
-MODEL = "incode"
-INIT_REGIME = "siren"
+MODEL = "relu"
+INIT_REGIME = "none"
 ENCODING = None
 MODE = "softmax" 
 TOTAL_LAYERS = 8 # number of total layers = depth = n_hidden + 2

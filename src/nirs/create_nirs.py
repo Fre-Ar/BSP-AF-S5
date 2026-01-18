@@ -231,10 +231,14 @@ def get_model_path(
             suffix = f"_w0={trimf(model_cfg.w0)}_wh={trimf(model_cfg.w_hidden)}_{reg}{tiling}"
         case "gauss":
             suffix = f"_s={trimf(model_cfg.s)}"
+        case "wire":
+            suffix = f"_w0={trimf(model_cfg.w0)}_s={trimf(model_cfg.s)}"
         case "hosc":
             suffix = f"_beta={trimf(model_cfg.beta)}"
         case "sinc":
             suffix = f"_w0={trimf(model_cfg.w0)}"
+        case "finer":
+            suffix = f"_w0={trimf(model_cfg.w0)}_k={trimf(model_cfg.k)}"
         case "relu":
             suffix = ""
         case "fr_siren" | "fr_relu":
