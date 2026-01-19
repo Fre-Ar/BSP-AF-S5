@@ -3,11 +3,10 @@ import os
 from nirs.create_nirs import get_model_path
 from nirs.inference import InferenceConfig
 from utils.utils_geo import COUNTRIES_ECOC_PATH, CHECKPOINT_PATH, TRAINING_DATA_PATH, BEST_CHECKPOINT_PATH
-from nirs.create_nirs import get_model_size
 
-MODEL = "relu"
-INIT_REGIME = "none"
-ENCODING = "pos"
+MODEL = "siren"
+INIT_REGIME = "siren"
+ENCODING = None
 MODE = "softmax" 
 TOTAL_LAYERS = 8 # number of total layers = depth = n_hidden + 2
 WIDTH = 512
@@ -27,7 +26,7 @@ FR_P = 8
 FR_ALPHA = 0.01
 
 ENCOD_ALPHA = 2*math.pi
-ENCOD_SIGMA = 5.0
+ENCOD_SIGMA = 10.0
 ENCOD_M = 256
 
 MODEL_CONFIG = InferenceConfig(
@@ -52,8 +51,3 @@ MODEL_PATH = f"{BEST_CHECKPOINT_PATH}/{model_path}"
 TRAIN_DIR = os.path.join(TRAINING_DATA_PATH, "training")
 TRAIN_BIAS_DIR = os.path.join(TRAINING_DATA_PATH, "training_biased")
 EVAL_PATH = os.path.join(TRAINING_DATA_PATH, f"eval_uniform_1M.parquet")
-
-
-
-#params = get_model_size(3, 1024)
-#print(f"Model params: {params/1e6:.3f}M")

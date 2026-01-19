@@ -241,6 +241,8 @@ def get_model_path(
             suffix = f"_w0={trimf(model_cfg.w0)}_k={trimf(model_cfg.k)}"
         case "relu":
             suffix = ""
+        case "mfn_fourier" | "mfn_gabor":
+            suffix = ""
         case "fr_siren" | "fr_relu":
             suffix = (
                 f"_w0={trimf(model_cfg.w0)}_"

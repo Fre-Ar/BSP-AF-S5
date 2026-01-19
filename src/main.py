@@ -50,7 +50,7 @@ def train(lr = LR):
         file_prefix="10M_",
         out_dir=BEST_CHECKPOINT_PATH,
         log_dir=BEST_LOGS_PATH,
-        batch_size = 4096,#16384,
+        batch_size = 4096,
         traning_size = TRAINING_POINTS,
         lr=lr,
         weight_decay=WD,
@@ -60,16 +60,14 @@ def train(lr = LR):
 
 def viz(pred: bool = False):  
     visualize_model(
-        #parquet_path=os.path.join(TRAINING_DATA_PATH, "log_dataset_1M.parquet"),
         parquet_path=os.path.join(TRAINING_DATA_PATH, "eval_uniform_1M.parquet"),
-        #parquet_path=os.path.join(TRAINING_DATA_PATH, "eval_border_1M.parquet"),
     
         checkpoint_path=MODEL_PATH,
         model_cfg=MODEL_CONFIG,
         
         sample=1_000_000,
         predictions_only=pred,
-        show_plots=False,
+        show_plots=True,
         overrides={180: "#000000"} #australia becomes black
         )
 
@@ -79,8 +77,8 @@ def img():
     raster(
         model_cfg=MODEL_CONFIG,
         checkpoint_path=MODEL_PATH,
-        render = "c1",
-        area="alpes")
+        render = "c2",
+        area="globe")
     
     dt = time.perf_counter() - t0
     print(f"Total rasterization time Elapsed: {dt:.3f}s")
@@ -110,9 +108,8 @@ def get_counts():
     
 
 if __name__ == "__main__":
-    #pass
-    seed_everything(SEED)
-    for lr in [4e-4, 1e-4, 4e-5, 1e-5]:
-        train(lr=lr)
-    #viz(True)
+    pass
+    #seed_everything(SEED)
+    #train()
+    #viz(False)
     #img()

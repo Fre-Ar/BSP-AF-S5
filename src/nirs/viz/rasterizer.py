@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 import math
+from matplotlib import colormaps as cmaps
 
 from nirs.world_bank_country_colors import colors_important
 from nirs.viz.visualizer import _hash_colors  
@@ -157,6 +158,73 @@ def _colormap_gray(
     a = np.full((values.shape[0], 1), int(255 * opacity), dtype=np.uint8)
     
     return np.concatenate([rgb, a], axis=1)
+def _colormap_scalar(
+    values: np.ndarray,
+    vmin: float,
+    vmax: float,
+    opacity: float = 0.95,
+    cmap_name: str = "viridis",
+    log_scale: bool = True
+) -> np.ndarray:
+    """
+    Maps scalar values to a matplotlib colormap.
+    
+    Parameters
+    ----------
+    values : ndarray
+        1D array of scalar values to map.
+    vmin, vmax : float
+        Lower/upper clipping bounds.
+    opacity : float
+        Alpha channel in [0,1].
+    cmap_name : str
+        Name of the matplotlib colormap to use.
+    log_scale : bool
+        If True, use logarithmic mapping (vmin and values must be > 0).
+
+    Returns
+    -------
+    rgba : ndarray
+        (N, 4) uint8 array of RGBA pixels.
+    """
+    if log_scale:
+        # Handle log scale: clip to a small positive epsilon to avoid log(0)
+        eps = 1e-2 # 10 meters minimum for log scaling stability
+        safe_vmin = max(vmin, eps)
+        safe_vmax = max(vmax, safe_vmin + eps)
+        
+        # Clip values and apply log
+        vals_clipped = np.clip(values, safe_vmin, safe_vmax)
+        
+        # Normalize: (log(x) - log(min)) / (log(max) - log(min))
+        log_v = np.log(vals_clipped)
+        log_min = np.log(safe_vmin)
+        log_max = np.log(safe_vmax)
+        
+        vals_norm = (log_v - log_min) / (log_max - log_min)
+        vals_norm = np.clip(vals_norm, 0.0, 1.0)
+    else:
+        # Linear scale
+        denom = vmax - vmin
+        vals_norm = np.clip((values - vmin) / max(1e-12, denom), 0.0, 1.0)
+    
+    # Retrieve colormap
+    try:
+        cmap = cmaps[cmap_name]
+    except (TypeError, KeyError):
+        cmap = cmaps.get_cmap(cmap_name)
+
+    # Map to RGBA float (N, 4)
+    rgba_f = cmap(vals_norm)
+    
+    # Convert to uint8 [0, 255]
+    rgba = (rgba_f * 255.0).astype(np.uint8)
+    
+    # Apply constant opacity override
+    if opacity < 1.0:
+        rgba[:, 3] = int(255 * opacity)
+    
+    return rgba
 
 def _colorize_ids_with_overrides(
     ids: np.ndarray,
@@ -285,7 +353,7 @@ def rasterize_model_from_checkpoint(
         
         # Colorize based on mode
         if render == "distance":
-            rgba = _colormap_gray(
+            rgba = _colormap_scalar(
                 pred.dist_km, 
                 vmin=distance_clip_km[0], 
                 vmax=distance_clip_km[1], 
