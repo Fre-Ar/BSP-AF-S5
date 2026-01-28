@@ -1,3 +1,5 @@
+# src/nirs/loss.py
+
 import torch.nn as nn, torch
 
 class UncertaintyWeighting(nn.Module):

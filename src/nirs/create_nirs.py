@@ -1,3 +1,4 @@
+# src/nirs/create_nirs.py
 
 import math
 from typing import Tuple, Type, Optional, Callable, Dict
