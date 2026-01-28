@@ -21,6 +21,10 @@ from utils.utils import write_json, human_int, _concat_parquet_shards
 # -----------------------------
 
 def create_adjacency_graph():
+    """
+    Creates an adjacency graph from the specified countries layer for ECOC generation.
+    The graph is saved as a JSON file at the specified path.
+    """
     gdf, id_field = load_layer(GPKG_PATH, COUNTRIES_LAYER, ID_FIELD)
     adj = build_adjacency(gdf, id_field=id_field)
   
@@ -31,6 +35,10 @@ def create_adjacency_graph():
 # -----------------------------
 
 def create_ecoc():
+    """
+    Generates Error-Correcting Output Codes (ECOC) for the countries based on the adjacency graph.
+    The ECOC are saved to the specified path.
+    """
     gen_ecoc(ADJACENCY_JSON_PATH,
              COUNTRIES_ECOC_PATH,
              ECOC_BITS,
@@ -41,6 +49,9 @@ def create_ecoc():
 # -----------------------------
 
 def preprocess_borders():
+    """
+    Preprocesses country borders from the GPKG file and creates a FlatGeobuf (FGB) file.
+    """
     create_borders(GPKG_PATH, BORDERS_FGB_PATH, COUNTRIES_LAYER, ID_FIELD)
 
 # -----------------------------
@@ -49,14 +60,8 @@ def preprocess_borders():
 
 def create_training_data():
     """
-    100% uniform:
-        100k points takes ~46s
-        1M   points takes ~220s
-        10M  points takes ~1600s or ~26 min
-    100% border:
-        100k points takes ~46s
-        1M   points takes ~148s
-        10M  points takes ~1160s or ~19 min
+    Creates training data Parquet files with biased sampling.
+    Generates multiple files with specified number of points and saves them to the training data path.
     """
     # safety for multiprocessing
     mp.set_start_method("spawn", force=True)
@@ -86,61 +91,9 @@ def create_training_data():
     dt = time.perf_counter() - t0
     print(f"Total time Elapsed: {dt:.3f}s")
     
-# -----------------------------
-# Parquet Bundling
-# -----------------------------
-
-def bundle_training_data(
-    source_subdir: str = "training_2M", 
-    target_subdir: str = "training", 
-    bundle_factor: int = 5,
-    final_points_per_file: int = 10_000_000
-):
-    """
-    Concatenates smaller parquet files into larger ones.
-    
-    Default settings (100 -> 20 files):
-    - source: src/geodata/parquet/training_2M
-    - target: src/geodata/parquet/training
-    - bundle_factor: 5 (merges 5 files into 1)
-    """
-    source_dir = os.path.join(TRAINING_DATA_PATH, source_subdir)
-    target_dir = os.path.join(TRAINING_DATA_PATH, target_subdir)
-    
-    os.makedirs(target_dir, exist_ok=True)
-
-    # 1. Gather sorted files
-    files = sorted(glob.glob(os.path.join(source_dir, "*.parquet")))
-    if not files:
-        print(f"No parquet files found in {source_dir}")
-        return
-
-    total_files = len(files)
-    num_bundles = math.ceil(total_files / bundle_factor)
-    h_int = human_int(final_points_per_file)
-
-    print(f"Found {total_files} files. Bundling into ~{num_bundles} files (factor {bundle_factor})...")
-
-    # 2. Batch process
-    for i in range(num_bundles):
-        start = i * bundle_factor
-        end = min(start + bundle_factor, total_files)
-        batch_paths = files[start:end]
-
-        out_name = f"training_{h_int}_{i:02d}.parquet"
-        out_path = os.path.join(target_dir, out_name)
-
-        print(f"[{i+1}/{num_bundles}] Merging {len(batch_paths)} files -> {out_name}...")
-        
-        # Reuse existing memory-efficient concat utility
-        _concat_parquet_shards(
-            shard_paths=batch_paths,
-            out_path=out_path
-        )
-
-    print(f"Done. New files located in: {target_dir}")
-
-
 if __name__ == "__main__":
-    #pass
-    create_training_data()
+    pass
+    #create_adjacency_graph()
+    #create_ecoc()
+    #preprocess_borders() 
+    #create_training_data()
